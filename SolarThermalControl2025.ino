@@ -49,6 +49,14 @@ bool time_of_day_valid = false;
 
 bool solar_pump_on = false;
 
+bool recirc_pump_on = false;
+
+bool spa_heater_relay_on = false;
+
+bool spa_calling_for_heat = false;
+
+bool spa_heat_ex_pump_on = false;
+
 /*
     Central (and only) task scheduler data structure.
 */
@@ -103,7 +111,7 @@ void control_recirc_pump_callback();
 Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
 Task print_status_to_serial(TASK_SECOND * 5, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
 Task frob_relays(TASK_SECOND, TASK_FOREVER, &frob_relays_callback, &ts, true);
-Task control_recirc_pump(TASK_SECOND, TASK_FOREVER, &control_recirc_pump_callback, &ts, true);
+Task control_recirc_pump(TASK_SECOND * 30, TASK_FOREVER, &control_recirc_pump_callback, &ts, true);
 /*
    This reads all the sensors frequently, does a little filtering of some of them, and deposits the results in global variables above.
 */
@@ -126,6 +134,7 @@ void read_time_and_sensor_inputs_callback()
   int spa_hex_temp_C_x10 = spa_hex_temp_millivolts - 500;
   spa_heat_exchanger_temperature_F = ((((long)spa_hex_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
 
+  spa_calling_for_heat = digitalRead(SPA_HEAT_IN);
 }
 
 void frob_relays_callback()
@@ -138,7 +147,39 @@ void frob_relays_callback()
     digitalWrite(SSR_SOLAR_PUMP_OUT, LOW);
     solar_pump_on = false;
   }
+
+  // If the tank is not warm enough to heat the spa, enable the relay we inserted in the spa controller 
+  // that passes the spa's call-for-heat signal to big power relay that controls the spa's electric heater
+
+  if (spa_heater_relay_on == false && tank_temperature_F < 110) {
+    digitalWrite(SPA_ELEC_HEAT_ENABLE_OUT, HIGH);
+    spa_heater_relay_on = true;
+  }
+
+  // If the tank is warm enough to heat the spa, ensure that its electric heater is off
+  
+  if (spa_heater_relay_on && tank_temperature_F > 115) {
+    digitalWrite(SPA_ELEC_HEAT_ENABLE_OUT, LOW);
+    spa_heater_relay_on = false;
+  }
+
+  // If the electric heater is off and the spa is calling for heat, ensure that the spa's heat
+  // exchanger pump is on.  
+  if (spa_heater_relay_on == false /* we are heating with solar */) {
+    if (spa_calling_for_heat && spa_heat_ex_pump_on == false) {
+      digitalWrite(SSR_SPA_HEAT_EX_PUMP_OUT, HIGH);
+      spa_heat_ex_pump_on = true;
+    } 
+  }
+
+  // If the spa is not calling for heat, ensure that the spa's heat exchanger pump is off.
+  if (spa_heat_ex_pump_on && spa_calling_for_heat == false) {
+    assert(spa_heater_relay_on == false);
+    digitalWrite(SSR_SPA_HEAT_EX_PUMP_OUT, LOW);
+    spa_heat_ex_pump_on = false;
+  }
 }
+
 
 /*
    This is the main system tracing function.  It emits a line of ASCII to the RS-485 line with lots of information.
@@ -229,6 +270,28 @@ void print_status_to_serial_callback(void)
   print_buf(buf);
 }
 
+void control_recirc_pump_callback()
+{
+  unsigned h = hour(arduino_time);
+  unsigned m = minute(arduino_time);
+
+// Between 8AM and 23:30, turn the recirc pump on at the top of the hour and at the half hour.
+// Turn it off after a minute
+
+  if (h >= 8 && h <= 23) {
+    if (m == 0 || m == 30) {
+      if (recirc_pump_on == false) {
+        recirc_pump_on = true;
+        digitalWrite(SSR_RECIRC_PUMP_OUT, HIGH);
+      }
+    } else {
+      if (recirc_pump_on) {
+        recirc_pump_on = false;
+        digitalWrite(SSR_RECIRC_PUMP_OUT, LOW);
+      }
+    }
+  }
+}
 
 int dst_correction(tmElements_t *tm)
 {
