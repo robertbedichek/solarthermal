@@ -75,11 +75,11 @@ Scheduler ts;
 
 #define SSR_SOLAR_PUMP_OUT (7) // Arduino output pin 7 on J4, writing '1' turns on solar pump SSR
 
-#define SSR_RECIRC_PUMP_OUT (-1)  // Assign a pin
+#define SSR_RECIRC_PUMP_OUT (12)  // Arduino output pin 12.  Writing '1' turns on the recirculation pump SSR
 
-#define SSR_SPA_HEAT_EX_PUMP_OUT (-1) // Assign a pin
+#define SSR_SPA_HEAT_EX_PUMP_OUT (8) // Writing '1' turns on the pump that pushes spa water through the spa heat exchanger
 
-#define SPA_ELEC_HEAT_ENABLE_OUT (-1) // Assign a pin
+#define SPA_ELEC_HEAT_ENABLE_OUT (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
 
 //    Arudino Analog In 0, measures the voltage from the LM35 glued to the tank
 // See TMP36 temperature sensor (https://learn.adafruit.com/tmp36-temperature-sensor)
