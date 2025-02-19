@@ -3,7 +3,8 @@
    This controls:
       An SSR that controls a 120VAC water pump that moves water from the tank to the panels (and back)
       An SSR that controls the 120VAC water pump that recirculates hot water through our home
-      An SSR that controls a pump that moves water through a heat exchanger (in the hot water tank) that heats spa water
+      An SSR that controls our Takagi natural-gas-fired domestic water heater
+        The Takagi is fed by water that first goes through a heat exchanger in a 4000 pound thermal mass (water)
       A 12V signal that powers a small 12V relay added to the spa controller that enables the electrical spa heater (the "native" heater for the spa)
 
    This senses:
@@ -21,6 +22,29 @@
 #include <EEPROM.h>
 #include <assert.h>
 
+/*
+ * We have two Sparkfun relay boards and possibly other 1-wire devices
+ */
+#include <Wire.h>
+
+/*
+ * Low voltage relay bank.  Relay 1 enables the electric spa heater (the built-in heater that is part of the spa) when set to '1',
+ * this allows the spa's thermostatic system to control the spa heater normally, as it did when it came from the factory.
+ * 
+ * Relay 2 commands the motorized valve to open, allowing the spa's built-in recirculation pump to push water through the heat
+ * exchanger in the solar mass.
+ * 
+ * Relay 3 commands the motorized valve to close, making the spa's built-in recirculation pump to do what it did when it came from the
+ * factory, just push water through the electric heater (which might or might not be enabled) and onto the spa.
+ * 
+ * Relay 4 is unused.
+ */
+#include "SparkFun_Qwiic_Relay.h"
+#define LV_RELAY_ADDR  (0x6D)                 // Default I2C address of the mechanical, low voltage, 4-relay board
+Qwiic_Relay quad_lv_relay(LV_RELAY_ADDR);
+
+#include <SerLCD.h>
+SerLCD lcd;
 
 #define _TASK_SLEEP_ON_IDLE_RUN
 #include <TaskScheduler.h>
@@ -35,10 +59,10 @@ const byte rxPin = 2; // Wire this to Tx Pin of RS-232 level shifter
 const byte txPin = 3; // Wire this to Rx Pin of RS-232 level shifter
  
 SoftwareSerial rs232 (rxPin, txPin);
-bool send_to_rs232 = true;
+bool send_to_rs232 = false;
 
 //    This is for the 1307 RTC we installed on the Ocean Controls main board.
-#include <DS1307RTC.h>
+// #include <DS1307RTC.h>
 
 //   All the operational code uses this time structure.  This is initialized at start time from the battery-backed up DS1307 RTC.
 time_t arduino_time;
@@ -55,7 +79,9 @@ bool spa_heater_relay_on = false;
 
 bool spa_calling_for_heat = false;
 
-bool spa_heat_ex_pump_on = false;
+bool spa_heat_ex_valve_open = false;
+
+bool takagi_on = true;
 
 /*
     Central (and only) task scheduler data structure.
@@ -73,26 +99,38 @@ Scheduler ts;
 */
 #define SERIAL_BAUD (38400)
 
-#define SSR_SOLAR_PUMP_OUT (7) // Arduino output pin 7 on J4, writing '1' turns on solar pump SSR
+/*
+ * We have a Sparkfun SSR 4-relay board.  However, it is (1) not present on the I2C bus, and (2) obsolete.
+ * We use three of the four relays, but we drive them directly from Arudino digital outputs.
+ * To enable an SSR, we drive its control output to ground.
+ */
+#define SSR_SOLAR_PUMP  (12)    // writing '0' turns on solar pump
+#define SSR_RECIRC_PUMP (11)    // writing '0' turns on the recirculation pump
+#define SSR_TAKAGI      (10)    // writing '0' turns on the Takagi natural-gas fired water heater
 
-#define SSR_RECIRC_PUMP_OUT (12)  // Arduino output pin 12.  Writing '1' turns on the recirculation pump SSR
+/*
+ * There is a motorized valve that I added to the spa.  When it is open, some of the water coming from the recirculation pump in the spa
+ * will go through the stainless steel heat exchanger that I added to the solar tank.  This valve is controlled by two 12VDC signals.  When
+ * the "open" signal is +12V and the "close" signal is ground, the valve will open.  When the "close" signal is +12VDC and the "open" signal
+ * is ground, then the valve will close.  These two signals are enabled by relays 1 and 2 in the Sparkfun relay board.
+ */
+#define LV_SPA_HEAT_EX_VALVE_CLOSE (2)   // Turning on this relay will cause the spa heat exchanger valve to close
+#define LV_SPA_HEAT_EX_VALVE_OPEN  (1)   // Turning this relay on will cause the spa heat exchanger valve to open
 
-#define SSR_SPA_HEAT_EX_PUMP_OUT (8) // Writing '1' turns on the pump that pushes spa water through the spa heat exchanger
-
-#define SPA_ELEC_HEAT_ENABLE_OUT (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
+#define LV_SPA_ELEC_HEAT_ENABLE (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
 
 //    Arudino Analog In 0, measures the voltage from the LM35 glued to the tank
 // See TMP36 temperature sensor (https://learn.adafruit.com/tmp36-temperature-sensor)
-#define TANK_TEMP_IN (0)
+#define TANK_TEMP_ANALOG_IN (0)
 
 // Solar panel temperature
-#define PANEL_TEMP_IN (1)
+#define PANEL_TEMP_ANALOG_IN (1)
 
 // Temperature of output side of spa heat exchanger
-#define SPA_HEAT_EX_TEMP_IN (2)
+#define SPA_HEAT_EX_TEMP_ANALOG_IN (2)
 
 // Digital signal that indicates spa is calling for heat
-#define SPA_HEAT_IN (3)
+#define SPA_HEAT_DIGITAL_IN (9)
 
 void setup_time(void);
 
@@ -105,11 +143,13 @@ int spa_heat_exchanger_temperature_F;
 
 void read_time_and_sensor_inputs_callback();
 void print_status_to_serial_callback();
+void update_lcd_callback();
 void frob_relays_callback();
 void control_recirc_pump_callback();
 
 Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
 Task print_status_to_serial(TASK_SECOND * 5, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
+Task update_lcd(TASK_SECOND, TASK_FOREVER, &update_lcd_callback, &ts, true);
 Task frob_relays(TASK_SECOND, TASK_FOREVER, &frob_relays_callback, &ts, true);
 Task control_recirc_pump(TASK_SECOND * 30, TASK_FOREVER, &control_recirc_pump_callback, &ts, true);
 /*
@@ -119,32 +159,46 @@ void read_time_and_sensor_inputs_callback()
 {
   arduino_time = now();
   
-  unsigned tank_temp_volts_raw = analogRead(TANK_TEMP_IN);  // Raw ADC value: 0..1023 for 0..5V
+  unsigned tank_temp_volts_raw = analogRead(TANK_TEMP_ANALOG_IN);  // Raw ADC value: 0..1023 for 0..5V
   unsigned tank_temp_millivolts = (((unsigned long)tank_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
   int tank_temp_C_x10 = tank_temp_millivolts - 500;
   tank_temperature_F = ((((long)tank_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
 
-  unsigned panel_temp_volts_raw = analogRead(PANEL_TEMP_IN);  // Raw ADC value: 0..1023 for 0..5V
+  unsigned panel_temp_volts_raw = analogRead(PANEL_TEMP_ANALOG_IN);  // Raw ADC value: 0..1023 for 0..5V
   unsigned panel_temp_millivolts = (((unsigned long)panel_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
   int panel_temp_C_x10 = panel_temp_millivolts - 500;
   panel_temperature_F = ((((long)panel_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
 
-  unsigned spa_hex_temp_volts_raw = analogRead(SPA_HEAT_EX_TEMP_IN);  // Raw ADC value: 0..1023 for 0..5V
+  unsigned spa_hex_temp_volts_raw = analogRead(SPA_HEAT_EX_TEMP_ANALOG_IN);  // Raw ADC value: 0..1023 for 0..5V
   unsigned spa_hex_temp_millivolts = (((unsigned long)spa_hex_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
   int spa_hex_temp_C_x10 = spa_hex_temp_millivolts - 500;
   spa_heat_exchanger_temperature_F = ((((long)spa_hex_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
 
-  spa_calling_for_heat = digitalRead(SPA_HEAT_IN);
+  spa_calling_for_heat = digitalRead(SPA_HEAT_DIGITAL_IN);
+}
+
+void open_spa_heat_exchanger_valve()
+{
+  quad_lv_relay.turnRelayOff(LV_SPA_HEAT_EX_VALVE_CLOSE);
+  quad_lv_relay.turnRelayOn(LV_SPA_HEAT_EX_VALVE_OPEN);
+  spa_heat_ex_valve_open = true;
+}
+
+void close_spa_heat_exchanger_valve()
+{
+  quad_lv_relay.turnRelayOff(LV_SPA_HEAT_EX_VALVE_OPEN);
+  quad_lv_relay.turnRelayOn(LV_SPA_HEAT_EX_VALVE_CLOSE);
+  spa_heat_ex_valve_open = false;
 }
 
 void frob_relays_callback()
 {
   if (solar_pump_on == false && panel_temperature_F > (tank_temperature_F + 40)) {
-    digitalWrite(SSR_SOLAR_PUMP_OUT, HIGH);
+    digitalWrite(SSR_SOLAR_PUMP, LOW); // Turn on Solar pump
     solar_pump_on = true;
   }
   if (solar_pump_on && panel_temperature_F < tank_temperature_F) {
-    digitalWrite(SSR_SOLAR_PUMP_OUT, LOW);
+    digitalWrite(SSR_SOLAR_PUMP, HIGH); // Turn off Solar pump
     solar_pump_on = false;
   }
 
@@ -152,31 +206,38 @@ void frob_relays_callback()
   // that passes the spa's call-for-heat signal to big power relay that controls the spa's electric heater
 
   if (spa_heater_relay_on == false && tank_temperature_F < 110) {
-    digitalWrite(SPA_ELEC_HEAT_ENABLE_OUT, HIGH);
+    quad_lv_relay.turnRelayOn(LV_SPA_ELEC_HEAT_ENABLE);
     spa_heater_relay_on = true;
   }
 
   // If the tank is warm enough to heat the spa, ensure that its electric heater is off
   
   if (spa_heater_relay_on && tank_temperature_F > 115) {
-    digitalWrite(SPA_ELEC_HEAT_ENABLE_OUT, LOW);
+    quad_lv_relay.turnRelayOff(LV_SPA_ELEC_HEAT_ENABLE);
     spa_heater_relay_on = false;
   }
 
-  // If the electric heater is off and the spa is calling for heat, ensure that the spa's heat
-  // exchanger pump is on.  
-  if (spa_heater_relay_on == false /* we are heating with solar */) {
-    if (spa_calling_for_heat && spa_heat_ex_pump_on == false) {
-      digitalWrite(SSR_SPA_HEAT_EX_PUMP_OUT, HIGH);
-      spa_heat_ex_pump_on = true;
-    } 
-  }
+  const bool test = false;
+  if (test) {
+    if (second(arduino_time) < 30) {
+      close_spa_heat_exchanger_valve();
+    } else {
+      open_spa_heat_exchanger_valve();
+    }
+  } else {
+    // If the electric heater is off and the spa is calling for heat, ensure that the spa's heat
+    // exchanger pump is on.  
+    if (spa_heater_relay_on == false /* we are heating with solar */) {
+      if (spa_calling_for_heat && spa_heat_ex_valve_open == false) {
+        open_spa_heat_exchanger_valve();
+      } 
+    }
 
-  // If the spa is not calling for heat, ensure that the spa's heat exchanger pump is off.
-  if (spa_heat_ex_pump_on && spa_calling_for_heat == false) {
-    assert(spa_heater_relay_on == false);
-    digitalWrite(SSR_SPA_HEAT_EX_PUMP_OUT, LOW);
-    spa_heat_ex_pump_on = false;
+    // If the spa is not calling for heat, ensure that the spa's heat exchanger valve is closed
+    if (spa_heat_ex_valve_open && spa_calling_for_heat == false) {
+      assert(spa_heater_relay_on == false);
+      close_spa_heat_exchanger_valve();
+    }
   }
 }
 
@@ -242,7 +303,7 @@ void print_status_to_serial_callback(void)
 
  
   if (line_counter == 0) {
-    const char *m PROGMEM = "# Date    Time Year Md  Pos  Dif  Sol Delt Rain  Volts Tmp Amp Mot Drk UpL LwL GUp GDn CoL OvC  Knots\n\r";
+    const char *m = "# Date    Time Year Tank Panel SpaT SpaH Spump Rpump Takagi\n\r";
     Serial.print(m);
     if (send_to_rs232) {
       rs232.print(m);
@@ -255,19 +316,92 @@ void print_status_to_serial_callback(void)
     // We generate the output line in chunks, to conversve memory.  But it also makes the code easier to
     // read because we don't have one humongous snprintf().  The size of buf is carefully chosen to be just large enough.
     
-  char buf[45];
-  snprintf(buf, sizeof(buf), "%s %d %02d:%02d:%02d %4d %4d %4d", 
+  char buf[80];
+  snprintf(buf, sizeof(buf), "%s %d %02d:%02d:%02d %4d %4d %4d  %4d %4d  %4d  %4d %4d\n", 
       monthShortStr(month(arduino_time)), 
       day(arduino_time), 
       hour(arduino_time),
       minute(arduino_time), 
       second(arduino_time), 
-      year(arduino_time) - 30,
+      year(arduino_time),
       tank_temperature_F,
       panel_temperature_F,
-      spa_heat_exchanger_temperature_F);
+      spa_heat_exchanger_temperature_F,
+      spa_heater_relay_on,
+      solar_pump_on,
+      recirc_pump_on,
+      takagi_on);
   
   print_buf(buf);
+}
+
+void print_2_digits_to_lcd(int number)
+{
+  if (number >= 0 && number < 10) {
+    lcd.write('0');
+  }
+  lcd.print(number);
+}
+
+void update_lcd_callback()
+{
+  if (second(arduino_time) > 3) {
+    lcd.setCursor(0 /* column */, 0 /* row */);
+    print_2_digits_to_lcd(hour(arduino_time));  // Display this on the first row
+    lcd.print(":");
+    print_2_digits_to_lcd(minute(arduino_time));
+    lcd.print(":");
+    print_2_digits_to_lcd(second(arduino_time));
+    lcd.print("        ");
+
+    lcd.setCursor(0, 1);
+    lcd.print("T: ");
+    lcd.print(tank_temperature_F);
+    lcd.print(" P: ");
+    lcd.print(panel_temperature_F);
+    lcd.print(" H: ");
+    lcd.print(spa_heat_exchanger_temperature_F);
+
+    lcd.setCursor(0, 2);
+    lcd.print("                    ");
+    lcd.setCursor(0, 2);
+    {
+      // We only update row 2 if something we display there has changed.  Otherwise, there is a blinking of the display on every update.
+      static bool last_recirc_pump_on = false;
+      static bool last_solar_pump_on = false;
+      static bool last_spa_heat_ex_valve_open = false;
+      static bool first_time = true;
+    
+      if (first_time || last_recirc_pump_on != recirc_pump_on ||  last_solar_pump_on != solar_pump_on || last_spa_heat_ex_valve_open != spa_heat_ex_valve_open) {
+        lcd.setCursor(0, 2);
+        lcd.print("                    ");
+        lcd.setCursor(0, 2);
+       
+        if (recirc_pump_on) {
+          lcd.print("RecircP ");
+        }
+        if (solar_pump_on) {
+          lcd.print("SolarP ");
+        }
+        if (spa_heat_ex_valve_open) {
+          lcd.print("Spa-HEX");
+        }
+        first_time = false;
+        last_recirc_pump_on = recirc_pump_on;
+        last_solar_pump_on = solar_pump_on;
+        last_spa_heat_ex_valve_open = spa_heat_ex_valve_open;
+      }
+    }
+    lcd.setCursor(0,3);
+    lcd.print("                    ");
+    lcd.setCursor(0,3);
+    if (spa_heater_relay_on) {
+      lcd.print("Spa-elec ");
+    }
+    if (spa_calling_for_heat) {
+      lcd.print("Spa-call");
+    }
+  }
 }
 
 void control_recirc_pump_callback()
@@ -282,12 +416,12 @@ void control_recirc_pump_callback()
     if (m == 0 || m == 30) {
       if (recirc_pump_on == false) {
         recirc_pump_on = true;
-        digitalWrite(SSR_RECIRC_PUMP_OUT, HIGH);
+        digitalWrite(SSR_RECIRC_PUMP, LOW); // Ground the low side of the SSR, turning on recirculation pump
       }
     } else {
       if (recirc_pump_on) {
         recirc_pump_on = false;
-        digitalWrite(SSR_RECIRC_PUMP_OUT, LOW);
+        digitalWrite(SSR_RECIRC_PUMP, HIGH); // Unground the low side of the SSR, turning off recirculation pump
       }
     }
   }
@@ -310,6 +444,7 @@ int dst_correction(tmElements_t *tm)
    Read the RTC chip and set the 'Arduino' time based on it.  We do this on system start and once per day.
    The Arduino clock is not as accurate as the RTC.
 */
+#ifdef RTC
 void setup_time(void)
 {
   tmElements_t tm;
@@ -328,6 +463,20 @@ void setup_time(void)
     }
   }
 }
+#endif
+
+/*
+   Called by failure paths that should never happen.  When we get the RS-485 input working, we'll allow the user
+   to do things in this case and perhaps resume operation.
+*/
+void fail(const char *fail_message)
+{
+  Serial.println(fail_message);
+
+  
+  delay(500); // Give the serial link time to propogate the error message before execution ends
+  abort();
+}
 /*
    This is the function that the Arudino run time system calls once, just after start up.  We have to set the
    pin modes of the ATMEGA correctly as inputs or outputs.  We also fetch values from EEPROM for use during
@@ -337,12 +486,8 @@ void setup()
 {
   delay(1000); // In case something further along crashes and we restart quickly, this will give a one-second pause
  
-  digitalWrite(SSR_SOLAR_PUMP_OUT, LOW);
-  digitalWrite(SSR_RECIRC_PUMP_OUT, LOW);
-  digitalWrite(SSR_SPA_HEAT_EX_PUMP_OUT, LOW);
-  digitalWrite(SPA_ELEC_HEAT_ENABLE_OUT, LOW);
-
   analogReference(DEFAULT);
+  Wire.begin();
   
   rs232.begin(rs232_baud);
 #ifdef SETTIME
@@ -352,13 +497,48 @@ void setup()
   Serial.begin(SERIAL_BAUD);
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
 
-  Serial.print(F("\n\r#Suntracker "));
+  Serial.print(F("\n\r#Solarthermal "));
   Serial.print(F(__DATE__));
   Serial.write(' ');
   Serial.println(F(__TIME__));
 
-  rs232.println(F("\n\r#Suntracker "));
+  rs232.println(F("\n\r#Solarthermal "));
   
+  if (!quad_lv_relay.begin()) {
+    fail("REL LV");
+  }
+
+  // Ensure that the motorized valve is unpowered
+  quad_lv_relay.turnRelayOff(LV_SPA_HEAT_EX_VALVE_CLOSE);
+  quad_lv_relay.turnRelayOff(LV_SPA_HEAT_EX_VALVE_OPEN);
+
+  quad_lv_relay.turnRelayOn(LV_SPA_ELEC_HEAT_ENABLE);
+
+  pinMode(LED_BUILTIN, OUTPUT); 
+  
+  pinMode(SSR_SOLAR_PUMP, OUTPUT); 
+  digitalWrite(SSR_SOLAR_PUMP, HIGH);
+  
+  pinMode(SSR_RECIRC_PUMP, OUTPUT);
+  digitalWrite(SSR_RECIRC_PUMP, HIGH);
+
+  takagi_on = true;
+  pinMode(SSR_TAKAGI, OUTPUT);
+  digitalWrite(SSR_TAKAGI, LOW); // Turn on Takagi
+
+  lcd.begin(Wire, 0x72);
+  lcd.setBacklight(255, 255, 255);
+  lcd.setContrast(5);
+  lcd.clear();
+  
+  lcd.setCursor(0 /* column */, 0 /* row */);
+  lcd.print(F("SolarThermal "));  // Display this on the first row
+  
+  lcd.setCursor(0,1);
+  lcd.print(F(__DATE__));         // Display this on the second row, left-adjusted
+  
+  lcd.setCursor(0, 2);
+  lcd.print(F(__TIME__));         // Display this on the third row, left-adjusted
 }
 
 /*
@@ -446,10 +626,12 @@ void setup_rtc()
         }
       }
     }
+#ifdef RTC    
     // and configure the RTC with this info
     if (RTC.write(tm)) {
       config = true;
     }
+#endif    
   }
 
   if (parse && config) {
