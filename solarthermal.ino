@@ -51,7 +51,7 @@ SerLCD lcd;
 
 #include <TimeLib.h>     // for update/display of time
 
-#include <SoftwareSerial.h>
+// #include <SoftwareSerial.h>
 
 enum diag_mode_e {d_oper, d_rpump, d_spump, d_spa_hex_valve, d_spa_elec, d_last} diag_mode;
 
@@ -60,8 +60,8 @@ const unsigned long rs232_baud = 9600 ;
 const byte rxPin = 2; // Wire this to Tx Pin of RS-232 level shifter
 const byte txPin = 3; // Wire this to Rx Pin of RS-232 level shifter
  
-SoftwareSerial rs232 (rxPin, txPin);
-bool send_to_rs232 = false;
+// SoftwareSerial rs232 (rxPin, txPin);
+// bool send_to_rs232 = false;
 
 //    This is for the 1307 RTC we installed on the Ocean Controls main board.
 // #include <DS1307RTC.h>
@@ -124,13 +124,13 @@ Scheduler ts;
 
 //    Arudino Analog In 0, measures the voltage from the LM35 glued to the tank
 // See TMP36 temperature sensor (https://learn.adafruit.com/tmp36-temperature-sensor)
-#define TANK_TEMP_ANALOG_IN (0)
+#define TANK_TEMP_ANALOG_IN (A0)
 
 // Solar panel temperature
-#define PANEL_TEMP_ANALOG_IN (1)
+#define PANEL_TEMP_ANALOG_IN (A1)
 
 // Temperature of output side of spa heat exchanger
-#define SPA_HEAT_EX_TEMP_ANALOG_IN (2)
+#define SPA_HEAT_EX_TEMP_ANALOG_IN (A2)
 
 // Digital signal that indicates spa is calling for heat
 #define SPA_HEAT_DIGITAL_IN (8)
@@ -154,13 +154,13 @@ int spa_heat_exchanger_temperature_F;
 
 void read_time_and_sensor_inputs_callback();
 void print_status_to_serial_callback();
-void read_keys_callback();
+void process_pressed_keys_callback();
 void update_lcd_callback();
 void frob_relays_callback();
 void control_recirc_pump_callback();
 
 Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
-Task read_keys(100, TASK_FOREVER, &read_keys_callback, &ts, true);
+Task process_pressed_keys(100, TASK_FOREVER, &process_pressed_keys_callback, &ts, true);
 Task print_status_to_serial(TASK_SECOND * 5, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
 Task update_lcd(250, TASK_FOREVER, &update_lcd_callback, &ts, true);
 Task frob_relays(TASK_SECOND, TASK_FOREVER, &frob_relays_callback, &ts, true);
@@ -262,77 +262,103 @@ void turn_spa_heater_relay_off()
    spa_heater_relay_on = false;
    
 }
-void read_keys_callback()
+
+bool key_select_pressed = false;
+bool key_enter_pressed = false;
+bool key_plus_pressed = false;
+bool key_minus_pressed = false;
+
+#define PIN_CHANGE_INTERRUPT_VECTOR PCINT2_vect  // PCINT2 covers D4–D7
+volatile unsigned long lastInterruptTime = 0;
+#define DEBOUNCE_DELAY 50  // 50ms debounce time
+
+
+ISR(PIN_CHANGE_INTERRUPT_VECTOR) 
 {
-  static int debounce_timer = 0;
-  bool key_select = digitalRead(KEY_1) == LOW;
-  bool key_enter = digitalRead(KEY_2) == LOW;
-  bool key_plus = digitalRead(KEY_3) == LOW;
-  bool key_minus = digitalRead(KEY_4) == LOW;
-    
-  if (debounce_timer > 0) {
-    if ((key_select|key_enter|key_plus|key_minus) == false) {
-      debounce_timer--;
-    }
-  } else {  
+  unsigned long currentTime = millis();
+  if ((currentTime - lastInterruptTime) > DEBOUNCE_DELAY) {  // Debounce check
+  
+    bool key_select = !(PIND & (1 << PD7));
+    bool key_enter = !(PIND & (1 << PD6));
+    bool key_plus = !(PIND & (1 << PD5));
+    bool key_minus = !(PIND & (1 << PD4));
+
     if (key_select) {
-      diag_mode = (diag_mode + 1) % d_last;
-      debounce_timer = 2;
+      key_select_pressed = true;
     }
-      // Set time: setTime(Hour, Minute, Second, Day, Month, Year)
-   
+    if (key_enter) {
+      key_enter_pressed = true;
+    }
     if (key_plus) {
-      switch (diag_mode) {
-        case d_oper:
-          adjustTime(600);
-          break;
-
-        case d_rpump:
-          turn_recirc_pump_on();
-          break;
-
-        case d_spump:
-          turn_solar_pump_on();
-          break;
-
-        case d_spa_hex_valve:          
-          open_spa_heat_exchanger_valve();
-          break;
-
-        case d_spa_elec:
-          turn_spa_heater_relay_on();
-          break; 
-      }
-      debounce_timer = 2;
+      key_plus_pressed = true;
     }
-
     if (key_minus) {
-      switch (diag_mode) {
-        case d_oper:
-          adjustTime(-600);
-          break;
-
-        case d_rpump:
-          turn_recirc_pump_off();
-          break;
-
-        case d_spump:
-          turn_solar_pump_off();
-          break;
-
-        case d_spa_hex_valve:          
-          close_spa_heat_exchanger_valve();
-          break;
-
-        case d_spa_elec:
-          turn_spa_heater_relay_off();
-          break; 
-      }
-      debounce_timer = 2;
+      key_minus_pressed = true;
     }
-  }
+    
+    lastInterruptTime = currentTime;  // Update debounce timer
+  } 
 }
 
+void process_pressed_keys_callback()
+{
+  if (key_select_pressed) {
+    diag_mode = (diag_mode + 1) % d_last;
+    key_select_pressed = false;
+  }
+    // Set time: setTime(Hour, Minute, Second, Day, Month, Year)
+ 
+  if (key_plus_pressed) {
+    switch (diag_mode) {
+      case d_oper:
+        adjustTime(600);
+        break;
+
+      case d_rpump:
+        turn_recirc_pump_on();
+        break;
+
+      case d_spump:
+        turn_solar_pump_on();
+        break;
+
+      case d_spa_hex_valve:          
+        open_spa_heat_exchanger_valve();
+        break;
+
+      case d_spa_elec:
+        turn_spa_heater_relay_on();
+        break; 
+    }
+    key_plus_pressed = false;
+  }
+
+  if (key_minus_pressed) {
+    switch (diag_mode) {
+      case d_oper:
+        adjustTime(-600);
+        break;
+
+      case d_rpump:
+        turn_recirc_pump_off();
+        break;
+
+      case d_spump:
+        turn_solar_pump_off();
+        break;
+
+      case d_spa_hex_valve:          
+        close_spa_heat_exchanger_valve();
+        break;
+
+      case d_spa_elec:
+        turn_spa_heater_relay_off();
+        break; 
+    }
+    key_minus_pressed = false;
+  }
+  update_lcd_callback();
+}
 void frob_relays_callback()
 {
   if (diag_mode == d_oper) {
@@ -385,9 +411,9 @@ void frob_relays_callback()
 void print_buf(char *b)
 {
   Serial.print(b);  
-  if (send_to_rs232) {
-    rs232.print(b);
-  }
+ // if (send_to_rs232) {
+    // rs232.print(b);
+  //}
 }
 
 // Called periodically.  Sends relevant telemetry back over one or both of the serial channels
@@ -398,9 +424,9 @@ void print_status_to_serial_callback(void)
   if (line_counter == 0) {
     const char *m = "# Date    Time Year  Mode Tank Panel SpaT SpaH Spump Rpump Takagi\n\r";
     Serial.print(m);
-    if (send_to_rs232) {
-      rs232.print(m);
-    }
+//if (send_to_rs232) {
+  //    rs232.print(m);
+    //}
     line_counter = 20;
   } else {
     line_counter--;
@@ -453,8 +479,8 @@ void update_lcd_callback()
     print_2_digits_to_lcd(second(arduino_time));
 
     lcd.print(" ");
-    //lcd.print(digitalRead(VALVE_STATUS_OPEN) ? "O" : "-");
-    //lcd.print(digitalRead(VALVE_STATUS_CLOSED) ? "C" : "-");
+    // lcd.print(digitalRead(VALVE_STATUS_OPEN) ? "O" : "-");
+    // lcd.print(digitalRead(VALVE_STATUS_CLOSED) ? "C" : "-");
     
     lcd.print("  ");
     lcd.print(diag_mode_to_string(diag_mode));      
@@ -518,6 +544,8 @@ void fail(const char *fail_message)
   delay(500); // Give the serial link time to propogate the error message before execution ends
   abort();
 }
+
+
 /*
    This is the function that the Arudino run time system calls once, just after start up.  We have to set the
    pin modes of the ATMEGA correctly as inputs or outputs.  We also fetch values from EEPROM for use during
@@ -530,10 +558,7 @@ void setup()
   analogReference(DEFAULT);
   Wire.begin();
   
-  rs232.begin(rs232_baud);
-#ifdef SETTIME
-  setup_rtc();
-#endif
+//  rs232.begin(rs232_baud);
 
   Serial.begin(SERIAL_BAUD);
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
@@ -543,7 +568,7 @@ void setup()
   Serial.write(' ');
   Serial.println(F(__TIME__));
 
-  rs232.println(F("\n\r#Solarthermal "));
+//  rs232.println(F("\n\r#Solarthermal "));
   
   
   pinMode(LED_BUILTIN, OUTPUT); 
@@ -566,6 +591,11 @@ void setup()
 
   // pinMode(VALVE_STATUS_OPEN, INPUT_PULLUP);
   // pinMode(VALVE_STATUS_CLOSED, INPUT_PULLUP);
+
+  PCICR |= (1 << PCIE2);   // Enable Pin Change Interrupt for PORTD
+  PCMSK2 |= (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7);  // Enable for D4–D7
+
+  sei();  // Enable global interrupts
 
   lcd.begin(Wire, 0x72);         // Default I2C address of Sparkfun 4x20 SerLCD
   lcd.setBacklight(255, 255, 255);
