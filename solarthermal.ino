@@ -81,7 +81,15 @@ bool spa_heater_relay_on = false;
 
 bool spa_calling_for_heat = false;
 
+// This boolean keeps track of whether the valve has most recently been commanded open or closed.
 bool spa_heat_ex_valve_open = false;
+
+// These two booleans represent the latest values sensed from the valve itself.  Because the valve over-closes
+// we do not let it close for more than 11 seconds and that's not enough for the heat_ex_status_closed signal
+// to signal.  So in normal operation, this signal is never asserted.
+
+bool spa_heat_ex_valve_status_open = false;
+bool spa_heat_ex_valve_status_closed = false;
 
 bool takagi_on = true;
 
@@ -108,7 +116,7 @@ Scheduler ts;
  */
 #define SSR_SOLAR_PUMP  (12)    // writing '0' turns on solar pump
 #define SSR_RECIRC_PUMP (11)    // writing '0' turns on the recirculation pump
-#define SSR_SPARE       (10)
+// We have reused this pin, so it is not availble #define SSR_SPARE       (10)
 #define SSR_TAKAGI      (9)    // writing '0' turns on the Takagi natural-gas fired water heater
 
 /*
@@ -117,10 +125,10 @@ Scheduler ts;
  * the "open" signal is +12V and the "close" signal is ground, the valve will open.  When the "close" signal is +12VDC and the "open" signal
  * is ground, then the valve will close.  These two signals are enabled by relays 1 and 2 in the Sparkfun relay board.
  */
-#define LV_SPA_HEAT_EX_VALVE_CLOSE (2)   // Turning on this relay will cause the spa heat exchanger valve to close
-#define LV_SPA_HEAT_EX_VALVE_OPEN  (1)   // Turning this relay on will cause the spa heat exchanger valve to open
+#define LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE (1)   // Turning on this relay will cause the spa heat exchanger valve to close
+#define LV_RELAY_SPA_HEAT_EX_VALVE_OPEN  (2)   // Turning this relay on will cause the spa heat exchanger valve to open
 
-#define LV_SPA_ELEC_HEAT_ENABLE (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
+#define LV_RELAY_SPA_ELEC_HEAT_ENABLE (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
 
 //    Arudino Analog In 0, measures the voltage from the LM35 glued to the tank
 // See TMP36 temperature sensor (https://learn.adafruit.com/tmp36-temperature-sensor)
@@ -140,8 +148,7 @@ Scheduler ts;
 #define KEY_3 (5)
 #define KEY_4 (4)  // Bottom most input key
 
-#define VALVE_STATUS_OPEN   (A4)  // Pin AA/D18 connects to the green wire from the Solid Valve and indicates that the valve is open
-#define VALVE_STATUS_CLOSED (A5)  // Pin A5/D19 connects to the red wire from the Solid Valve and indicates that the valve is closed
+#define SPA_HEAT_EX_VALVE_STATUS_OPEN   (10)  // Pin green wire from the Solid Valve and indicates that the valve is open when this is a zero
 
 void setup_time(void);
 
@@ -152,6 +159,8 @@ int tank_temperature_F;                // Degrees C converter to Farenheight
 int panel_temperature_F;
 int spa_heat_exchanger_temperature_F;
 
+void monitor_valve_closing_callback();
+void monitor_valve_opening_callback();
 void read_time_and_sensor_inputs_callback();
 void print_status_to_serial_callback();
 void process_pressed_keys_callback();
@@ -159,6 +168,8 @@ void update_lcd_callback();
 void frob_relays_callback();
 void control_recirc_pump_callback();
 
+Task monitor_valve_closing(200, TASK_FOREVER, &monitor_valve_closing_callback, &ts, false);
+Task monitor_valve_opening(200, TASK_FOREVER, &monitor_valve_opening_callback, &ts, false);
 Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
 Task process_pressed_keys(100, TASK_FOREVER, &process_pressed_keys_callback, &ts, true);
 Task print_status_to_serial(TASK_SECOND * 5, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
@@ -188,6 +199,8 @@ void read_time_and_sensor_inputs_callback()
   spa_heat_exchanger_temperature_F = ((((long)spa_hex_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
 
   spa_calling_for_heat = digitalRead(SPA_HEAT_DIGITAL_IN) == LOW;
+
+  spa_heat_ex_valve_status_open = digitalRead(SPA_HEAT_EX_VALVE_STATUS_OPEN) == 0;
 }
 
 char *diag_mode_to_string(enum diag_mode_e diag_mode) 
@@ -227,38 +240,64 @@ void turn_solar_pump_off()
   solar_pump_on = false;
 }
 
+
+volatile unsigned long valve_motion_time_start = 0;
+
+
+
+void monitor_valve_closing_callback()
+{
+  unsigned long current_time = millis();
+  if ((current_time - valve_motion_time_start) > 11000) {
+    // We turn off the close-valve process after 11 seconds, otherwise the valve turns
+    // too far and is left slightly open.
+  
+    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+    spa_heat_ex_valve_open = false;
+    monitor_valve_closing.disable();
+  }
+}
+
+void monitor_valve_opening_callback()
+{
+  unsigned long current_time = millis();
+  if (spa_heat_ex_valve_open || (current_time - valve_motion_time_start) > 15000) {
+    // We turn off the valve-opening process once the valve signal says it is open or
+    // after 15 seconds, as it should just take 13 seconds
+  
+    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+    spa_heat_ex_valve_open = true;
+    monitor_valve_opening.disable();
+  }
+}
+
 void open_spa_heat_exchanger_valve()
 {
-  quad_lv_relay->turnRelayOff(LV_SPA_HEAT_EX_VALVE_CLOSE);
-  quad_lv_relay->turnRelayOn(LV_SPA_HEAT_EX_VALVE_OPEN);
-
-  // 13 seconds should be enough time for the valve to fully open
-  delay(13000);
-  quad_lv_relay->turnRelayOff(LV_SPA_HEAT_EX_VALVE_OPEN);
-  spa_heat_ex_valve_open = true;
+  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+  quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+  valve_motion_time_start = millis();
+  monitor_valve_opening.enable();
 }
+
+// We start the valve closing and then enable a task that will turn off the closing signal after 11 seconds.
 
 void close_spa_heat_exchanger_valve()
 {
-  quad_lv_relay->turnRelayOff(LV_SPA_HEAT_EX_VALVE_OPEN);
-  quad_lv_relay->turnRelayOn(LV_SPA_HEAT_EX_VALVE_CLOSE);
-
-  // We turn off the close-valve process after 11 seconds, otherwise the valve turns
-  // too far and is left slightly open.
-  delay(11000);
-  quad_lv_relay->turnRelayOff(LV_SPA_HEAT_EX_VALVE_CLOSE);
-  spa_heat_ex_valve_open = false;
+  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+  quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+  valve_motion_time_start = millis();
+  monitor_valve_closing.enable();
 }
 
 void turn_spa_heater_relay_on()
 {
-   quad_lv_relay->turnRelayOn(LV_SPA_ELEC_HEAT_ENABLE);
+   quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
    spa_heater_relay_on = true;
 }
 
 void turn_spa_heater_relay_off()
 {
-   quad_lv_relay->turnRelayOff(LV_SPA_ELEC_HEAT_ENABLE);
+   quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
    spa_heater_relay_on = false;
    
 }
@@ -300,13 +339,16 @@ ISR(PIN_CHANGE_INTERRUPT_VECTOR)
   } 
 }
 
+// The interrupt routine above will set global variables indicating which keys have been pressed.
+// In this function, we look at those global variables and take action required by the key presses
+// and then reset those global variables.
+
 void process_pressed_keys_callback()
 {
   if (key_select_pressed) {
     diag_mode = (diag_mode + 1) % d_last;
     key_select_pressed = false;
   }
-    // Set time: setTime(Hour, Minute, Second, Day, Month, Year)
  
   if (key_plus_pressed) {
     switch (diag_mode) {
@@ -359,52 +401,81 @@ void process_pressed_keys_callback()
   }
   update_lcd_callback();
 }
+
+
+#define SOLAR_PUMP_DELAY (15 * 60 * 1000)
+#define HEATER_RELAY_DELAY (15 * 60 * 1000)
+#define SPA_VALVE_DELAY (30 * 60 * 1000)
+
+// This contains the normal basic operational logic of this controller, comparing temperatures
+// and deciding which pumps to turn on, how to set the spa heat exchanger valve, etc.
+
 void frob_relays_callback()
 {
+  static unsigned long last_solar_pump_change = 0;
+  static unsigned long last_spa_heater_relay_change = 0;
+  static unsigned long last_spa_valve_change = 0;
+  
+  unsigned long current_time = millis();
+  
   if (diag_mode == d_oper) {
     if (solar_pump_on == false && panel_temperature_F > (tank_temperature_F + 40)) {
-      turn_solar_pump_on();
+      if ((current_time - last_solar_pump_change) > SOLAR_PUMP_DELAY) {
+        turn_solar_pump_on();
+        last_solar_pump_change = current_time;
+      }
     }
     if (solar_pump_on && panel_temperature_F < tank_temperature_F) {
-      turn_solar_pump_off();      
+      if ((current_time - last_solar_pump_change) > SOLAR_PUMP_DELAY) { 
+        turn_solar_pump_off();
+        last_solar_pump_change = current_time;
+      }  
     }
   
     // If the tank is not warm enough to heat the spa, enable the relay we inserted in the spa controller 
     // that passes the spa's call-for-heat signal to big power relay that controls the spa's electric heater
   
     if (spa_heater_relay_on == false && tank_temperature_F < 110) {
-      turn_spa_heater_relay_on();
+      if ((current_time - last_spa_heater_relay_change) > HEATER_RELAY_DELAY) {
+        turn_spa_heater_relay_on();
+        last_spa_heater_relay_change = current_time;
+      }
     }
   
     // If the tank is warm enough to heat the spa, ensure that its electric heater is off
     
     if (spa_heater_relay_on && tank_temperature_F > 115) {
-      turn_spa_heater_relay_off();
+      if ((current_time - last_spa_heater_relay_change) > HEATER_RELAY_DELAY) {
+        turn_spa_heater_relay_off();
+        last_spa_heater_relay_change = current_time;
+      }
     }
-  
   
     // If the electric heater is off and the spa is calling for heat, ensure that the spa's heat
     // exchanger pump is on.  
     if (spa_heater_relay_on == false /* we are heating with solar */) {
       if (spa_calling_for_heat && spa_heat_ex_valve_open == false) {
-        open_spa_heat_exchanger_valve();
+        if ((current_time - last_spa_valve_change) > SPA_VALVE_DELAY) {
+          open_spa_heat_exchanger_valve();
+          last_spa_valve_change = current_time;
+        }
       } 
     }
 
     // If the spa is not calling for heat, ensure that the spa's heat exchanger valve is closed
     if (spa_heat_ex_valve_open && spa_calling_for_heat == false) {
       assert(spa_heater_relay_on == false);
-      close_spa_heat_exchanger_valve();
+      if ((current_time - last_spa_valve_change) > SPA_VALVE_DELAY) {
+        close_spa_heat_exchanger_valve();
+        last_spa_valve_change = current_time;
+      }
     }
   }
 }
 
-
 /*
    This is the main system tracing function.  It emits a line of ASCII to the RS-485 line with lots of information.
    We display this information in a form that gnuplot(1) can readily absorb.
-
-
 */
 
 // Send the passed string to one or both of our serial channels
@@ -422,7 +493,7 @@ void print_status_to_serial_callback(void)
   static char line_counter = 0;
 
   if (line_counter == 0) {
-    const char *m = "# Date    Time Year  Mode Tank Panel SpaT SpaH Spump Rpump Takagi\n\r";
+    const char *m = "# Date    Time Year  Mode Tank Panel SpaT SpaH Spump Rpump Takagi Valve\n\r";
     Serial.print(m);
 //if (send_to_rs232) {
   //    rs232.print(m);
@@ -441,7 +512,7 @@ void print_status_to_serial_callback(void)
 // Feb 21 13:04:38 2025  649   40   78    40    1     1     0    1
 
   char buf[80];
-  snprintf(buf, sizeof(buf), "%s %d %02d:%02d:%02d %4d %s %4d %4d  %4d %4d  %4d  %4d %4d\n", 
+  snprintf(buf, sizeof(buf), "%s %d %02d:%02d:%02d %4d %s %4d %4d  %4d %4d  %4d  %4d %4d %4d\n", 
       monthShortStr(month(arduino_time)), 
       day(arduino_time), 
       hour(arduino_time),
@@ -455,7 +526,8 @@ void print_status_to_serial_callback(void)
       spa_heater_relay_on,
       solar_pump_on,
       recirc_pump_on,
-      takagi_on);
+      takagi_on,
+      spa_heat_ex_valve_status_open);
   
   print_buf(buf);
 }
@@ -468,6 +540,8 @@ void print_2_digits_to_lcd(int number)
   lcd.print(number);
 }
 
+// This is called several times a second and updates the LCD display with the latest values and status.
+
 void update_lcd_callback()
 {
   if (second(arduino_time) > 3) {
@@ -478,9 +552,7 @@ void update_lcd_callback()
     lcd.print(":");
     print_2_digits_to_lcd(second(arduino_time));
 
-    lcd.print(" ");
-    // lcd.print(digitalRead(VALVE_STATUS_OPEN) ? "O" : "-");
-    // lcd.print(digitalRead(VALVE_STATUS_CLOSED) ? "C" : "-");
+    lcd.print(spa_heat_ex_valve_status_open ? F(" Open") : F(" ----"));
     
     lcd.print("  ");
     lcd.print(diag_mode_to_string(diag_mode));      
@@ -504,6 +576,9 @@ void update_lcd_callback()
     lcd.print(buf);
   }
 }
+
+// This controls the recirculation pump SSR and is currently simple, it just runs for one minute every 30 minutes
+// between 8AM and 11PM.
 
 void control_recirc_pump_callback()
 {
@@ -540,7 +615,7 @@ void fail(const char *fail_message)
   lcd.setCursor(0, 3);
   lcd.print(F("Fail: "));
   lcd.print(fail_message);         // Display this on the third row, left-adjusted
-  
+  lcd.print(F("  "));
   delay(500); // Give the serial link time to propogate the error message before execution ends
   abort();
 }
@@ -589,11 +664,21 @@ void setup()
   pinMode(KEY_3, INPUT_PULLUP);
   pinMode(KEY_4, INPUT_PULLUP);
 
-  // pinMode(VALVE_STATUS_OPEN, INPUT_PULLUP);
-  // pinMode(VALVE_STATUS_CLOSED, INPUT_PULLUP);
+  pinMode(SPA_HEAT_EX_VALVE_STATUS_OPEN, INPUT_PULLUP);
 
-  PCICR |= (1 << PCIE2);   // Enable Pin Change Interrupt for PORTD
+
+  PCICR |= (1 << PCIE2);                                        // Enable Pin Change Interrupt for PORTD  
+  PCICR &= ~((1 << PCIE0) | (1 << PCIE1));                      // Disable PCINT0 (PORTB) and PCINT1 (PORTC)
   PCMSK2 |= (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7);  // Enable for D4–D7
+
+// #ifdef NOTDEF  
+  Serial.print(F("PCICR="));
+  Serial.println(PCICR);
+  Serial.print(F("PCMSK1="));
+  Serial.print(PCMSK1);
+  Serial.print(F("PCMSK2="));
+  Serial.println(PCMSK2);
+// #endif
 
   sei();  // Enable global interrupts
 
@@ -681,11 +766,11 @@ void setup()
   }
   
   // Ensure that the motorized valve is unpowered
-  quad_lv_relay->turnRelayOff(LV_SPA_HEAT_EX_VALVE_CLOSE);
-  quad_lv_relay->turnRelayOff(LV_SPA_HEAT_EX_VALVE_OPEN);
+  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
 
   // By default, the spa electric heater should be able to heat the spa
-  quad_lv_relay->turnRelayOn(LV_SPA_ELEC_HEAT_ENABLE);
+  quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
 
   int hh, mmin, ss, dd, mm, yy;
   char monthStr[4];
@@ -704,6 +789,17 @@ void setup()
                 (strcmp(monthStr, "Nov") == 0) ? 11 : 12;
 
   setTime(hh, mmin, ss, dd, month, yy);
+
+  // Set the global variable that keeps track of whether the spa heat exchanger valve is open based
+  // on the "open" status from the valve itself.
+  spa_heat_ex_valve_status_open = digitalRead(SPA_HEAT_EX_VALVE_STATUS_OPEN) == 0;
+  if (spa_heat_ex_valve_status_open) {
+    spa_heat_ex_valve_open = true;
+    Serial.println(F("Spa heat exchanger valve is open"));
+  } else {
+    Serial.println(F("Spa heat exchanger valve is closed"));
+    spa_heat_ex_valve_open = false;
+  }
 }
 
 /*
