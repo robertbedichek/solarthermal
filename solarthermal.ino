@@ -123,9 +123,9 @@ Scheduler ts;
  * There is a motorized valve that I added to the spa.  When it is open, some of the water coming from the recirculation pump in the spa
  * will go through the stainless steel heat exchanger that I added to the solar tank.  This valve is controlled by two 12VDC signals.  When
  * the "open" signal is +12V and the "close" signal is ground, the valve will open.  When the "close" signal is +12VDC and the "open" signal
- * is ground, then the valve will close.  These two signals are enabled by relays 1 and 2 in the Sparkfun relay board.
+ * is ground, then the valve will close.  These two signals are enabled by relays 3 and 2 in the Sparkfun relay board.  Relay 1 is unused.
  */
-#define LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE (1)   // Turning on this relay will cause the spa heat exchanger valve to close
+#define LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE (3)   // Turning on this relay will cause the spa heat exchanger valve to close
 #define LV_RELAY_SPA_HEAT_EX_VALVE_OPEN  (2)   // Turning this relay on will cause the spa heat exchanger valve to open
 
 #define LV_RELAY_SPA_ELEC_HEAT_ENABLE (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
