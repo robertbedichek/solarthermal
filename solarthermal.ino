@@ -323,7 +323,7 @@ bool key_minus_pressed = false;
 
 #define PIN_CHANGE_INTERRUPT_VECTOR PCINT2_vect  // PCINT2 covers D4–D7
 volatile unsigned long lastInterruptTime = 0;
-#define DEBOUNCE_DELAY 50  // 50ms debounce time
+#define DEBOUNCE_DELAY 500  // 50ms debounce time
 
 
 ISR(PIN_CHANGE_INTERRUPT_VECTOR) 
@@ -362,6 +362,8 @@ void process_pressed_keys_callback()
   if (key_select_pressed) {
     diag_mode = (diag_mode + 1) % d_last;
     key_select_pressed = false;
+    lcd.setCursor(15 /* column */, 0 /* row */);
+    lcd.print(diag_mode_to_string(diag_mode)); 
   }
  
   if (key_plus_pressed) {
@@ -413,12 +415,6 @@ void process_pressed_keys_callback()
     }
     key_minus_pressed = false;
   }
-  if (diag_mode == d_oper) {
-   // lcd.setBacklight(255, 255, 255);
-  } else {
-   // lcd.setBacklight(255, 0, 0); //bright red
-  }
-  update_lcd_callback();
 }
 
 
@@ -568,7 +564,7 @@ void update_lcd_callback()
 
     
     lcd.setCursor(0 /* column */, 0 /* row */);
-    snprintf(buf, sizeof(buf), "%02d:%02d:%02d %4s %4s", 
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d %4s %4s ", 
       hour(arduino_time), minute(arduino_time), second(arduino_time), spa_heat_ex_valve_status_open ? " Open" : " ----", diag_mode_to_string(diag_mode));
     lcd.print(buf);
    
@@ -591,7 +587,7 @@ void update_lcd_callback()
 
 void control_recirc_pump_callback()
 {
-  if (diag_mode == false) {
+  if (diag_mode == d_oper) {
     unsigned h = hour(arduino_time);
     unsigned m = minute(arduino_time);
   
