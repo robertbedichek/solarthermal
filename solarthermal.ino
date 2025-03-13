@@ -21,6 +21,10 @@
 #include <ctype.h>
 #include <EEPROM.h>
 #include <assert.h>
+#include <RTClib.h>
+RTC_DS3231 rtc;
+#define RTC_I2C_ADDR (0x68)
+bool force_RTC_reload_from_build_time = false;
 
 /*
  * We have two Sparkfun relay boards and possibly other 1-wire devices
@@ -40,11 +44,13 @@
  * Relay 4 is unused.
  */
 #include "SparkFun_Qwiic_Relay.h"
-#define LV_RELAY_ADDR  (0x6D)                 // Default I2C address of the mechanical, low voltage, 4-relay board
+#define LV_RELAY_I2C_ADDR  (0x6D)                 // Default I2C address of the mechanical, low voltage, 4-relay board
+
 Qwiic_Relay *quad_lv_relay;
 
 #include <SerLCD.h>
 SerLCD lcd;
+#define SERLCD_I2C_ADDR (0x72)
 
 #define _TASK_SLEEP_ON_IDLE_RUN
 #include <TaskScheduler.h>
@@ -61,7 +67,7 @@ const byte rxPin = 2; // Wire this to Tx Pin of RS-232 level shifter
 const byte txPin = 3; // Wire this to Rx Pin of RS-232 level shifter
  
 // SoftwareSerial rs232 (rxPin, txPin);
-// bool send_to_rs232 = false;
+bool send_to_rs232 = false;
 
 //    This is for the 1307 RTC we installed on the Ocean Controls main board.
 // #include <DS1307RTC.h>
@@ -138,7 +144,7 @@ Scheduler ts;
 #define PANEL_TEMP_ANALOG_IN (A1)
 
 // Temperature of output side of spa heat exchanger
-#define SPA_HEAT_EX_TEMP_ANALOG_IN (A2)
+#define SPA_TEMP_ANALOG_IN (A2)
 
 // Digital signal that indicates spa is calling for heat
 #define SPA_HEAT_DIGITAL_IN (8)
@@ -157,7 +163,11 @@ void setup_time(void);
 */
 int tank_temperature_F;                // Degrees C converter to Farenheight
 int panel_temperature_F;
-int spa_heat_exchanger_temperature_F;
+int spa_temperature_F;
+
+bool tank_temperature_valid;
+bool panel_temperature_valid;
+bool spa_temperature_valid;
 
 void monitor_valve_closing_callback();
 void monitor_valve_opening_callback();
@@ -187,16 +197,20 @@ void read_time_and_sensor_inputs_callback()
   unsigned tank_temp_millivolts = (((unsigned long)tank_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
   int tank_temp_C_x10 = tank_temp_millivolts - 500;
   tank_temperature_F = ((((long)tank_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
+  tank_temperature_valid = (tank_temperature_F >= 32 && tank_temperature_F < 200);
+
 
   unsigned panel_temp_volts_raw = analogRead(PANEL_TEMP_ANALOG_IN);  // Raw ADC value: 0..1023 for 0..5V
   unsigned panel_temp_millivolts = (((unsigned long)panel_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
   int panel_temp_C_x10 = panel_temp_millivolts - 500;
   panel_temperature_F = ((((long)panel_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
+  panel_temperature_valid = (panel_temperature_F > 20 && panel_temperature_F < 300);
 
-  unsigned spa_hex_temp_volts_raw = analogRead(SPA_HEAT_EX_TEMP_ANALOG_IN);  // Raw ADC value: 0..1023 for 0..5V
-  unsigned spa_hex_temp_millivolts = (((unsigned long)spa_hex_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
-  int spa_hex_temp_C_x10 = spa_hex_temp_millivolts - 500;
-  spa_heat_exchanger_temperature_F = ((((long)spa_hex_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
+  unsigned spa_temp_volts_raw = analogRead(SPA_TEMP_ANALOG_IN);  // Raw ADC value: 0..1023 for 0..5V
+  unsigned spa_temp_millivolts = (((unsigned long)spa_temp_volts_raw * 5000UL) / 1023UL) + 20;  /* Calibration value */
+  int spa_temp_C_x10 = spa_temp_millivolts - 500;
+  spa_temperature_F = ((((long)spa_temp_C_x10 * 90L) / 50L) + 320L) / 10L;
+  spa_temperature_valid = (spa_temperature_F > 40 && spa_temperature_F < 120);
 
   spa_calling_for_heat = digitalRead(SPA_HEAT_DIGITAL_IN) == LOW;
 
@@ -399,6 +413,11 @@ void process_pressed_keys_callback()
     }
     key_minus_pressed = false;
   }
+  if (diag_mode == d_oper) {
+   // lcd.setBacklight(255, 255, 255);
+  } else {
+   // lcd.setBacklight(255, 0, 0); //bright red
+  }
   update_lcd_callback();
 }
 
@@ -419,13 +438,13 @@ void frob_relays_callback()
   unsigned long current_time = millis();
   
   if (diag_mode == d_oper) {
-    if (solar_pump_on == false && panel_temperature_F > (tank_temperature_F + 40)) {
+    if (solar_pump_on == false && panel_temperature_valid && tank_temperature_valid && panel_temperature_F > (tank_temperature_F + 40)) {
       if ((current_time - last_solar_pump_change) > SOLAR_PUMP_DELAY) {
         turn_solar_pump_on();
         last_solar_pump_change = current_time;
       }
     }
-    if (solar_pump_on && panel_temperature_F < tank_temperature_F) {
+    if (solar_pump_on && panel_temperature_valid && tank_temperature_valid && panel_temperature_F < tank_temperature_F) {
       if ((current_time - last_solar_pump_change) > SOLAR_PUMP_DELAY) { 
         turn_solar_pump_off();
         last_solar_pump_change = current_time;
@@ -435,7 +454,7 @@ void frob_relays_callback()
     // If the tank is not warm enough to heat the spa, enable the relay we inserted in the spa controller 
     // that passes the spa's call-for-heat signal to big power relay that controls the spa's electric heater
   
-    if (spa_heater_relay_on == false && tank_temperature_F < 110) {
+    if (spa_heater_relay_on == false && tank_temperature_valid && tank_temperature_F < 110) {
       if ((current_time - last_spa_heater_relay_change) > HEATER_RELAY_DELAY) {
         turn_spa_heater_relay_on();
         last_spa_heater_relay_change = current_time;
@@ -444,7 +463,7 @@ void frob_relays_callback()
   
     // If the tank is warm enough to heat the spa, ensure that its electric heater is off
     
-    if (spa_heater_relay_on && tank_temperature_F > 115) {
+    if (spa_heater_relay_on && tank_temperature_valid && tank_temperature_F > 115) {
       if ((current_time - last_spa_heater_relay_change) > HEATER_RELAY_DELAY) {
         turn_spa_heater_relay_off();
         last_spa_heater_relay_change = current_time;
@@ -482,9 +501,9 @@ void frob_relays_callback()
 void print_buf(char *b)
 {
   Serial.print(b);  
- // if (send_to_rs232) {
+  if (send_to_rs232) {
     // rs232.print(b);
-  //}
+  }
 }
 
 // Called periodically.  Sends relevant telemetry back over one or both of the serial channels
@@ -495,9 +514,9 @@ void print_status_to_serial_callback(void)
   if (line_counter == 0) {
     const char *m = "# Date    Time Year  Mode Tank Panel SpaT SpaH Spump Rpump Takagi Valve\n\r";
     Serial.print(m);
-//if (send_to_rs232) {
-  //    rs232.print(m);
-    //}
+    if (send_to_rs232) {
+    // rs232.print(m);
+    }
     line_counter = 20;
   } else {
     line_counter--;
@@ -522,7 +541,7 @@ void print_status_to_serial_callback(void)
       diag_mode_to_string(diag_mode),
       tank_temperature_F,
       panel_temperature_F,
-      spa_heat_exchanger_temperature_F,
+      spa_temperature_F,
       spa_heater_relay_on,
       solar_pump_on,
       recirc_pump_on,
@@ -545,29 +564,19 @@ void print_2_digits_to_lcd(int number)
 void update_lcd_callback()
 {
   if (second(arduino_time) > 3) {
-    lcd.setCursor(0 /* column */, 0 /* row */);
-    print_2_digits_to_lcd(hour(arduino_time));  // Display this on the first row
-    lcd.print(":");
-    print_2_digits_to_lcd(minute(arduino_time));
-    lcd.print(":");
-    print_2_digits_to_lcd(second(arduino_time));
+    char buf[21];
 
-    lcd.print(spa_heat_ex_valve_status_open ? F(" Open") : F(" ----"));
     
-    lcd.print("  ");
-    lcd.print(diag_mode_to_string(diag_mode));      
+    lcd.setCursor(0 /* column */, 0 /* row */);
+    snprintf(buf, sizeof(buf), "%02d:%02d:%02d %4s %4s", 
+      hour(arduino_time), minute(arduino_time), second(arduino_time), spa_heat_ex_valve_status_open ? " Open" : " ----", diag_mode_to_string(diag_mode));
+    lcd.print(buf);
    
     lcd.setCursor(0, 1);
-    lcd.print(F("T: "));
-    lcd.print(tank_temperature_F);
-    lcd.print(F(" P: "));
-    lcd.print(panel_temperature_F);
-    lcd.print(F(" H: "));
-    lcd.print(spa_heat_exchanger_temperature_F);
-    lcd.print(F("  "));
-
+    snprintf(buf, sizeof(buf), "T: %3d P: %3d S: %3d", tank_temperature_F, panel_temperature_F, spa_temperature_F);
+    lcd.print(buf);
+    
     lcd.setCursor(0, 2);
-    char buf[21];
     snprintf(buf, sizeof(buf), "RPump%c SPump%c HEX%c ", recirc_pump_on ? '+' : '-', solar_pump_on ? '+' : '-', spa_heat_ex_valve_open ? '+' : '-');
     lcd.print(buf);
     
@@ -632,8 +641,7 @@ void setup()
  
   analogReference(DEFAULT);
   Wire.begin();
-  
-//  rs232.begin(rs232_baud);
+  Wire.setClock(400000); 
 
   Serial.begin(SERIAL_BAUD);
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
@@ -642,10 +650,7 @@ void setup()
   Serial.print(F(__DATE__));
   Serial.write(' ');
   Serial.println(F(__TIME__));
-
-//  rs232.println(F("\n\r#Solarthermal "));
-  
-  
+ 
   pinMode(LED_BUILTIN, OUTPUT); 
 
   // Turn off the solar pump and the recirc pump
@@ -666,25 +671,15 @@ void setup()
 
   pinMode(SPA_HEAT_EX_VALVE_STATUS_OPEN, INPUT_PULLUP);
 
+  Wire.beginTransmission(SERLCD_I2C_ADDR);
+  Wire.write(0x7C);      // Special command indicator
+  Wire.write(0x2B);      // Change baud rate command
+  Wire.write(4);         // 4 = 115200 baud (see table below)
+  Wire.endTransmission();
 
-  PCICR |= (1 << PCIE2);                                        // Enable Pin Change Interrupt for PORTD  
-  PCICR &= ~((1 << PCIE0) | (1 << PCIE1));                      // Disable PCINT0 (PORTB) and PCINT1 (PORTC)
-  PCMSK2 |= (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7);  // Enable for D4–D7
-
-// #ifdef NOTDEF  
-  Serial.print(F("PCICR="));
-  Serial.println(PCICR);
-  Serial.print(F("PCMSK1="));
-  Serial.print(PCMSK1);
-  Serial.print(F("PCMSK2="));
-  Serial.println(PCMSK2);
-// #endif
-
-  sei();  // Enable global interrupts
-
-  lcd.begin(Wire, 0x72);         // Default I2C address of Sparkfun 4x20 SerLCD
-  lcd.setBacklight(255, 255, 255);
-  // lcd.setContrast(5);
+  lcd.begin(Wire, SERLCD_I2C_ADDR);         // Default I2C address of Sparkfun 4x20 SerLCD
+  lcd.setBacklight(255, 255, 255);            // Green and blue backlight while booting
+  lcd.setContrast(5);
   lcd.clear();
   
   lcd.setCursor(0 /* column */, 0 /* row */);
@@ -720,11 +715,11 @@ void setup()
           Serial.print("0");
         Serial.print(address, HEX);
         switch (address) {
-         case 0x72:
+         case SERLCD_I2C_ADDR:
            Serial.print(F(" (SerLCD 4x20)"));
            break;
 
-         case LV_RELAY_ADDR:
+         case LV_RELAY_I2C_ADDR:
            Serial.print(F(" (Quad Qwiic Relay)"));
            quad_lv_relay = new Qwiic_Relay(address);
            if (quad_lv_relay->begin() == 0) {
@@ -732,13 +727,17 @@ void setup()
            }
            break;
 
+        case RTC_I2C_ADDR:
+          Serial.print(F(" (DS3231 RTC)"));
+          break;
+          
          default:
           if (quad_lv_relay == (void *)0) {
             Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
             quad_lv_relay = new Qwiic_Relay(address);
             if (quad_lv_relay->begin()) {
               Serial.print(F(" Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
-              quad_lv_relay->changeAddress(LV_RELAY_ADDR);
+              quad_lv_relay->changeAddress(LV_RELAY_I2C_ADDR);
             } else {
               Serial.print(F(" unexpected device, unable to treat it as a quad qwiic relay\n"));
             }
@@ -772,24 +771,7 @@ void setup()
   // By default, the spa electric heater should be able to heat the spa
   quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
 
-  int hh, mmin, ss, dd, mm, yy;
-  char monthStr[4];
-  sscanf(__TIME__, "%d:%d:%d", &hh, &mmin, &ss);
-  sscanf(__DATE__, "%s %d %d", monthStr, &dd, &yy);
-  int month = (strcmp(monthStr, "Jan") == 0) ? 1 :
-                (strcmp(monthStr, "Feb") == 0) ? 2 :
-                (strcmp(monthStr, "Mar") == 0) ? 3 :
-                (strcmp(monthStr, "Apr") == 0) ? 4 :
-                (strcmp(monthStr, "May") == 0) ? 5 :
-                (strcmp(monthStr, "Jun") == 0) ? 6 :
-                (strcmp(monthStr, "Jul") == 0) ? 7 :
-                (strcmp(monthStr, "Aug") == 0) ? 8 :
-                (strcmp(monthStr, "Sep") == 0) ? 9 :
-                (strcmp(monthStr, "Oct") == 0) ? 10 :
-                (strcmp(monthStr, "Nov") == 0) ? 11 : 12;
-
-  setTime(hh, mmin, ss, dd, month, yy);
-
+  
   // Set the global variable that keeps track of whether the spa heat exchanger valve is open based
   // on the "open" status from the valve itself.
   spa_heat_ex_valve_status_open = digitalRead(SPA_HEAT_EX_VALVE_STATUS_OPEN) == 0;
@@ -800,6 +782,85 @@ void setup()
     Serial.println(F("Spa heat exchanger valve is closed"));
     spa_heat_ex_valve_open = false;
   }
+  if(!rtc.begin()) {
+    Serial.println(F("No RTC!"));
+    int hh, mmin, ss, dd, mm, yy;
+    char monthStr[4];
+    sscanf(__TIME__, "%d:%d:%d", &hh, &mmin, &ss);
+    sscanf(__DATE__, "%s %d %d", monthStr, &dd, &yy);
+    int month = (strcmp(monthStr, "Jan") == 0) ? 1 :
+                  (strcmp(monthStr, "Feb") == 0) ? 2 :
+                  (strcmp(monthStr, "Mar") == 0) ? 3 :
+                  (strcmp(monthStr, "Apr") == 0) ? 4 :
+                  (strcmp(monthStr, "May") == 0) ? 5 :
+                  (strcmp(monthStr, "Jun") == 0) ? 6 :
+                  (strcmp(monthStr, "Jul") == 0) ? 7 :
+                  (strcmp(monthStr, "Aug") == 0) ? 8 :
+                  (strcmp(monthStr, "Sep") == 0) ? 9 :
+                  (strcmp(monthStr, "Oct") == 0) ? 10 :
+                  (strcmp(monthStr, "Nov") == 0) ? 11 : 12;
+
+    setTime(hh, mmin, ss, dd, month, yy);
+
+  } else {
+    if(rtc.lostPower() || force_RTC_reload_from_build_time ) {
+      // this will adjust to the date and time at compilation
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+
+      // Add 15 seconds to compensate for the time to upload the sketch
+      DateTime newTime = rtc.now() + TimeSpan(0, 0, 0, 15);  
+
+    // Update the RTC
+      rtc.adjust(newTime);
+
+      Serial.println(F("Setting RTC from build time"));
+    } 
+    //we don't need the 32K Pin, so disable it
+    rtc.disable32K();
+    // set alarm 1, 2 flag to false (so alarm 1, 2 didn't happen so far)
+    // if not done, this easily leads to problems, as both register aren't reset on reboot/recompile
+    rtc.clearAlarm(1);
+    rtc.clearAlarm(2);
+
+    // stop oscillating signals at SQW Pin
+    // otherwise setAlarm1 will fail
+    rtc.writeSqwPinMode(DS3231_OFF);
+
+    // turn off alarm 2 (in case it isn't off already)
+    // again, this isn't done at reboot, so a previously set alarm could easily go overlooked
+    rtc.disableAlarm(2);
+
+    DateTime now = rtc.now();
+    int h = now.hour();
+    int m = now.minute();
+    int s = now.second();
+    int d = now.day();
+    int mo = now.month();
+    int y = now.year();
+    setTime(h, m, s, d, mo, y);
+
+    char buf[80];
+    snprintf(buf, sizeof(buf), "Set time from RTC: %s %d %02d:%02d:%02d %4d\n", 
+      monthShortStr(mo), d, h, m, s, y);
+  
+    print_buf(buf);
+  }
+
+  PCICR |= (1 << PCIE2);                                        // Enable Pin Change Interrupt for PORTD  
+  PCICR &= ~((1 << PCIE0) | (1 << PCIE1));                      // Disable PCINT0 (PORTB) and PCINT1 (PORTC)
+  PCMSK2 |= (1 << PD4) | (1 << PD5) | (1 << PD6) | (1 << PD7);  // Enable for D4–D7
+
+  sei();  // Enable global interrupts
+
+#ifdef NOTDEF  
+  Serial.print(F("PCICR="));
+  Serial.println(PCICR);
+  Serial.print(F("PCMSK1="));
+  Serial.print(PCMSK1);
+  Serial.print(F("PCMSK2="));
+  Serial.println(PCMSK2);
+#endif
+
 }
 
 /*
