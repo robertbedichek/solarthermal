@@ -26,24 +26,6 @@ RTC_DS3231 rtc;
 #define RTC_I2C_ADDR (0x68)
 bool force_RTC_reload_from_build_time = false;
 
-// We have two options for how to recognize pressing of one of the four keys.  One is to rapidly poll
-// the state of the digital input pins to which the keys are connected.  The other is to enable any-input-change
-// interrupts.  We have to use the polling method if we want to use certain libraries, e.g., SoftSerial.  Otherwise,
-// using interrupts is preferable.
-
-// We only use the #ifdef when we have to to avoid a linker error, otherwise we use an if statement to guard
-// execution of the two alterative methods.
-
-#undef POLL_KEYS
-#ifdef POLL_KEYS
-const bool poll_keys_bool = true;
-#else
-const bool poll_keys_bool = false;
-#endif
-
-const unsigned one_minute_in_milliseconds = 60000;
-const unsigned five_seconds_in_milliseconds = 5000;
-  
 /*
  * We have two Sparkfun relay boards and possibly other 1-wire devices
  */
@@ -74,59 +56,6 @@ SerLCD lcd;
 #include <TaskScheduler.h>
 
 #include <TimeLib.h>     // for update/display of time
-
-// #include <SoftwareSerial.h>
-
-enum diag_mode_e {d_oper, d_rpump, d_spump, d_takagi, d_spa_hex_valve, d_spa_elec, d_last} diag_mode;
-
-const unsigned long rs232_baud = 9600 ;
-
-const byte rxPin = 2; // Wire this to Tx Pin of RS-232 level shifter
-const byte txPin = 3; // Wire this to Rx Pin of RS-232 level shifter
- 
-// SoftwareSerial rs232 (rxPin, txPin);
-bool send_to_rs232 = false;
-
-//    This is for the 1307 RTC we installed on the Ocean Controls main board.
-// #include <DS1307RTC.h>
-
-//   All the operational code uses this time structure.  This is initialized at start time from the battery-backed up DS1307 RTC.
-time_t arduino_time;
-
-//   If we are able to read the DS1307 RTC over I2C, then we set this true and we can depend on
-//  the time of day being valid.
-bool time_of_day_valid = false;
-
-bool solar_pump_on = false;         // True if we are powering the solar tank hot water pump
-
-bool recirc_pump_on = false;        // True if we are powering the recirculation pump
-
-bool takagi_on = true;              // True if we are powering the Takagi flash heater
-const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
-const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
-
-bool spa_heater_relay_on = false;   // True if we have enabled the spa heater relay
-
-bool spa_calling_for_heat = false;  // True if the spa is signalling that it wants heat
-
-// THe next five global variables describe the state of the heat exchanger valve.  It can be open,
-// closed, in the process of opening or closing, or in an indeterminate state after we attempted to
-// open or close it.
-
-unsigned long valve_motion_start_time = 0;
-
-bool valve_timeout = false;         // True if it takes too long to open or close the spa heat exchanger valve
-                                    // Reset to false on next (attempted) valve operation 
-
-bool valve_error = false;           // True if the spa valve control API is called in a way that it does not expect
-                                    // Reset to false on next completed valve operation
-
-// These two booleans represent the latest values sensed from the valve itself.  
-
-bool spa_heat_ex_valve_status_open = false;
-bool spa_heat_ex_valve_status_closed = false;
-
-
 /*
     Central (and only) task scheduler data structure.
 */
@@ -175,8 +104,23 @@ Scheduler ts;
 #define SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN   (10)  // Green wire from the Solid Valve, which goes to Green CAT5. Valve is open when this is a zero
 #define SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN (3)  // Red wire on Solid valve, which goes to Orange CAT5.  Valve is closed when this is zero.
 
-void setup_time(void);
+void monitor_valve_closing_callback(void);
+void monitor_valve_opening_callback(void);
+void read_time_and_sensor_inputs_callback(void);
+void print_status_to_serial_callback(void);
+void poll_keys_callback(void);
+void process_pressed_keys_callback(void);
+void update_lcd_callback(void);
+void monitor_spa_valve_callback(void);
+void monitor_recirc_pump_callback(void);
+void monitor_takagi_callback(void);
+void monitor_clock_callback(void);
+void monitor_diag_mode_callback(void);
+void monitor_serial_console_callback(void);
+void monitor_solar_pump_callback(void);
+void monitor_spa_electric_heat_callback(void);
 
+/*****************************************************************************************************/
 enum temps_e {tank_e, panel_e, spa_e, last_temp_e};
 enum sensor_e {lm36_e, lm335_e};
 
@@ -190,35 +134,115 @@ struct temperature_s {
   int upper_bound_F;
 } temps [last_temp_e];
 
-void monitor_valve_closing_callback();
-void monitor_valve_opening_callback();
-void read_time_and_sensor_inputs_callback();
-void print_status_to_serial_callback();
-void poll_keys_callback();
-void process_pressed_keys_callback();
-void update_lcd_callback();
-void frob_relays_callback();
-void control_recirc_pump_callback();
-void monitor_clock_callback();
-void monitor_diag_mode_callback();
-void monitor_serial_console_callback();
+Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
+/*****************************************************************************************************/
+// We have two options for how to recognize pressing of one of the four keys.  One is to rapidly poll
+// the state of the digital input pins to which the keys are connected.  The other is to enable any-input-change
+// interrupts.  We have to use the polling method if we want to use certain libraries, e.g., SoftSerial.  Otherwise,
+// using interrupts is preferable.  Since we do not need SoftSerial, we use interrupts.  But it is handy to have
+// the option to switch to polling for some debugging purposes.
 
-unsigned long time_entering_diag_mode = 0;
-#define DIAG_MODE_TIMEOUT (600000) // 10 minutes
+volatile bool select_key_pressed = false;
+volatile bool enter_key_pressed = false;
+volatile bool plus_key_pressed = false;
+volatile bool minus_key_pressed = false;
 
+// We have two ways of recognizing pressed keys, the interrupt method and the polling method.
+// Our prefered and default method is via interrupts.  If we get a future peripheral with conflicting
+// resource needs (e.g., SoftSerial) or we want to try polling to isolate certain bugs, we may want
+// to enabling polling, so the option remains in the code.
+
+// #define POLL_KEYS
+#ifndef POLL_KEYS
+ISR(PCINT2_vect) 
+{
+  poll_keys_callback();
+}
+const bool poll_keys_bool = false;
+Task process_pressed_keys(100, TASK_FOREVER, &process_pressed_keys_callback, &ts, true);
+#else
+const bool poll_keys_bool = true;
+Task poll_keys(25, TASK_FOREVER, &poll_keys_callback, &ts, true);
+#endif
+
+volatile unsigned long lastInterruptTime = 0;
+const int debounce_delay = 150;  // 150ms debounce time
+/*****************************************************************************************************/
+const unsigned long one_second_in_milliseconds = 1000;
+const unsigned one_minute_in_milliseconds = 60000;
+const unsigned five_seconds_in_milliseconds = 5000;
+
+// We vary the frequency of status lines sent to the serial output from once per second when we are opening
+// or closing the spa heat exchanger valve, to five seconds during start up, to once per minute during normal
+// operations.
+
+Task print_status_to_serial(TASK_SECOND * 5, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
+/*****************************************************************************************************/
+// Update slightly faster than once per second so that the LCD time advances regularly in a way that 
+// looks normal to humans (i.e., make sure that the seconds display counts up once per second).
+Task update_lcd(900, TASK_FOREVER, &update_lcd_callback, &ts, true);
+/*****************************************************************************************************/
+// These global variables describe the state of the heat exchanger valve.  It can be open,
+// closed, in the process of opening or closing, or in an indeterminate state after we attempted to
+// open or close it.
+
+unsigned long valve_motion_start_time = 0;
+
+bool valve_timeout = false;         // True if it takes too long to open or close the spa heat exchanger valve
+                                    // Reset to false on next (attempted) valve operation 
+
+bool valve_error = false;           // True if the spa valve control API is called in a way that it does not expect
+                                    // Reset to false on next completed valve operation
+
+// These two booleans represent the latest values sensed from the valve itself.  
+
+bool spa_heat_ex_valve_status_open = false;
+bool spa_heat_ex_valve_status_closed = false;
+bool spa_calling_for_heat = false;  // True if the spa is signalling that it wants heat
+
+#define SPA_VALVE_OPEN_DELAY   MINUTES_TO_MILLISECONDS(30)
+#define SPA_VALVE_CLOSE_DELAY  MINUTES_TO_MILLISECONDS(30)
 
 Task monitor_valve_closing(500, TASK_FOREVER, &monitor_valve_closing_callback, &ts, false);
 Task monitor_valve_opening(500, TASK_FOREVER, &monitor_valve_opening_callback, &ts, false);
-Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
-Task poll_keys(25, TASK_FOREVER, &poll_keys_callback, &ts, poll_keys_bool);
-Task process_pressed_keys(100, TASK_FOREVER, &process_pressed_keys_callback, &ts, !poll_keys_bool);
+Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callback, &ts, true);
+/*****************************************************************************************************/
+#define MINUTES_TO_MILLISECONDS(x) ((x) * 60UL * 1000UL)
+#define SOLAR_PUMP_DELAY       MINUTES_TO_MILLISECONDS(20)
 
-Task print_status_to_serial(TASK_SECOND * 5, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
-Task update_lcd(TASK_SECOND, TASK_FOREVER, &update_lcd_callback, &ts, true);
-Task frob_relays(TASK_SECOND * 10, TASK_FOREVER, &frob_relays_callback, &ts, true);
-Task control_recirc_pump(TASK_SECOND * 30, TASK_FOREVER, &control_recirc_pump_callback, &ts, true);
+bool solar_pump_on = false;         // True if we are powering the solar tank hot water pump
+
+bool takagi_on = true;              // True if we are powering the Takagi flash heater
+const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
+const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
+
+Task monitor_solar_pump(TASK_SECOND * 60, TASK_FOREVER, &monitor_solar_pump_callback, &ts, true);
+/*****************************************************************************************************/
+bool spa_heater_relay_on = false;   // True if we have enabled the spa heater relay
+#define HEATER_RELAY_DELAY     MINUTES_TO_MILLISECONDS(30)
+
+Task monitor_spa_electric_heat(TASK_SECOND * 60, TASK_FOREVER, &monitor_spa_electric_heat_callback, &ts, true);
+/*****************************************************************************************************/
+bool recirc_pump_on = false;        // True if we are powering the recirculation pump
+
+Task monitor_recirc_pump(TASK_SECOND * 10, TASK_FOREVER, &monitor_recirc_pump_callback, &ts, true);
+/*****************************************************************************************************/
+#define TAKAGI_DELAY           MINUTES_TO_MILLISECONDS(30)
+Task monitor_takagi(TASK_SECOND * 60, TASK_FOREVER, &monitor_takagi_callback, &ts, true);
+/*****************************************************************************************************/
+//   All the operational code uses this time structure.  This is initialized at start time from the battery-backed up DS3231 RTC.
+time_t arduino_time;
+
 Task monitor_clock(TASK_SECOND * 3600, TASK_FOREVER, &monitor_clock_callback, &ts, true);
+/*****************************************************************************************************/
+typedef enum {d_oper, d_rpump, d_spump, d_takagi, d_spa_hex_valve, d_spa_elec, d_last} diag_mode_t;
+diag_mode_t diag_mode;
+
+unsigned long time_entering_diag_mode = 0;
+#define DIAG_MODE_TIMEOUT (600000) // 10 minutes
 Task monitor_diag_mode(TASK_SECOND * 60, TASK_FOREVER, &monitor_diag_mode_callback, &ts, false);
+/*****************************************************************************************************/
+
 Task monitor_serial_console(TASK_SECOND, TASK_FOREVER, &monitor_serial_console_callback, &ts, true);
 
 /* Called by paths that sense an inconsistency, but we may be able to continue operating, so we don't
@@ -251,7 +275,7 @@ void fail(const __FlashStringHelper *fail_message)
 /*
    This reads all the sensors frequently, does a little filtering of some of them, and deposits the results in global variables above.
 */
-void read_time_and_sensor_inputs_callback()
+void read_time_and_sensor_inputs_callback(void)
 {
   arduino_time = now();
   
@@ -273,23 +297,22 @@ void read_time_and_sensor_inputs_callback()
   spa_heat_ex_valve_status_closed = digitalRead(SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN) == LOW;
 }
 
-char *diag_mode_to_string(enum diag_mode_e diag_mode) 
+// Returns a string that desribes the current diag mode.  For some reason, it stopped working to pass
+// in the diag mode, but since we always passed in the global variable "diag_mode", just commenting out
+// the parameter here, and the passed arguments where this is called allowed this to compile again.
+
+const char *diag_mode_to_string(void) 
 {
-  switch (diag_mode) {
-    case d_oper:          return "Oper";
-    case d_rpump:         return "D-RP";
-    case d_spump:         return "D-SP";
-    case d_takagi:        return "D-TK";
-    case d_spa_hex_valve: return "D-HX";    
-    case d_spa_elec:      return "D-EL";
-    default:              return "ERR";
+  char *s[] = {"Oper", "D-RP", "D-SP", "D-TK", "D-HX", "D-EL"};
+  if (diag_mode < d_last) {
+    return s[diag_mode];
   }
-  return "E";
+  return "ERR";
 }
 
 // This task is enabled when we enter diag mode.  It checks to see if we've been in diag mode
 // too long and reverts to operational mode if so.
-void monitor_diag_mode_callback()
+void monitor_diag_mode_callback(void)
 {
   unsigned long now = millis();
   
@@ -299,63 +322,33 @@ void monitor_diag_mode_callback()
   }
 }
 
-void turn_recirc_pump_on() 
-{
-  recirc_pump_on = true;
-  digitalWrite(SSR_RECIRC_PUMP_PIN, LOW); // Ground the low side of the SSR, turning on recirculation pump
-}
 
-void turn_recirc_pump_off() 
-{
-  recirc_pump_on = false;
-  digitalWrite(SSR_RECIRC_PUMP_PIN, HIGH); // Un-Ground the low side of the SSR, turning off recirculation pump
-}
 
-void turn_solar_pump_on()
-{
-  digitalWrite(SSR_SOLAR_PUMP_PIN, LOW); // Turn on solar pump
-  solar_pump_on = true;
-}
+// This intiates the valve opening process by applying the correct polarity of power to the valve motor
+// and by enabling the task that monitors the opening process.
 
-void turn_solar_pump_off()
+void open_spa_heat_exchanger_valve(void)
 {
-  digitalWrite(SSR_SOLAR_PUMP_PIN, HIGH); // Turn off solar pump
-  solar_pump_on = false;
-}
-
-void turn_takagi_on()
-{
-  digitalWrite(SSR_TAKAGI_PIN, LOW); // Turn on Takagi flash heater
-  takagi_on = true;
-}
-
-void turn_takagi_off()
-{
-  digitalWrite(SSR_TAKAGI_PIN, HIGH); // Turn off Takagi flash heater
-  takagi_on = false;
-}
-
-void monitor_valve_closing_callback()
-{
-  unsigned long current_time = millis();
-  if ((current_time - valve_motion_start_time) > 15000) {
-    // We turn off the close-valve process after 15 seconds, as it should take just 13 seconds
-   valve_timeout = true;
-  }
-  if (spa_heat_ex_valve_status_closed || valve_timeout) {
+  if (monitor_valve_opening.isEnabled() == false && monitor_valve_closing.isEnabled() == false) {
     quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
-    monitor_valve_closing.disable();
-    valve_motion_start_time = 0;
-    if (print_status_to_serial.getInterval() < five_seconds_in_milliseconds) {
-      print_status_to_serial.setInterval(five_seconds_in_milliseconds);
+    quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+    valve_motion_start_time = millis();
+    valve_timeout = false;
+    monitor_valve_opening.enable();
+    if (print_status_to_serial.getInterval() > one_second_in_milliseconds) {
+      print_status_to_serial.setInterval(one_second_in_milliseconds);
     }
-    if (valve_timeout == false) {
-      valve_error = false;           // Reset error flag on successful closing of valve
-    }
+  } else {
+    valve_error = true;
   }
 }
 
-void monitor_valve_opening_callback()
+// This task is just enabled while the valve is opening, normally a 12 second process.
+// It checks to see if the vavle signals that it has opened, at which time it stops the valve
+// power and disables itself. If 15 seconds elpases without this signal, it also stops
+// the valve power and disables itself (and signals an valve motion error).
+
+void monitor_valve_opening_callback(void)
 {
   unsigned long current_time = millis();
   if ((current_time - valve_motion_start_time) > 15000) {
@@ -376,30 +369,11 @@ void monitor_valve_opening_callback()
   }
 }
 
-const unsigned long one_second_in_milliseconds = 1000;
+// This intiates the valve closing ing process by applying the correct polarity of power to the valve motor
+// and by enabling the task that monitors the opening process.
 
-void open_spa_heat_exchanger_valve()
+void close_spa_heat_exchanger_valve(void)
 {
-  Serial.println(F("# Open"));
-  if (monitor_valve_opening.isEnabled() == false && monitor_valve_closing.isEnabled() == false) {
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
-    quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
-    valve_motion_start_time = millis();
-    valve_timeout = false;
-    monitor_valve_opening.enable();
-    if (print_status_to_serial.getInterval() > one_second_in_milliseconds) {
-      print_status_to_serial.setInterval(one_second_in_milliseconds);
-    }
-  } else {
-    valve_error = true;
-  }
-}
-
-// We start the valve closing and then enable a task that will turn off the closing signal after 11 seconds.
-
-void close_spa_heat_exchanger_valve()
-{
-  Serial.println(F("# Close"));
   if (monitor_valve_opening.isEnabled() == false && monitor_valve_closing.isEnabled() == false) {
     quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
     quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
@@ -414,27 +388,43 @@ void close_spa_heat_exchanger_valve()
   }
 }
 
-void turn_spa_heater_relay_on()
+// This task is just enabled while the valve is closing, normally a 12 second process.
+// It checks to see if the vavle signals that it has closeed, at which time it stops the valve
+// power and disables itself.  If 15 seconds elpases without this signal, it also stops
+// the valve power and disables itself (and signals an valve motion error).
+
+void monitor_valve_closing_callback(void)
+{
+  unsigned long current_time = millis();
+  if ((current_time - valve_motion_start_time) > 15000) {
+    // We turn off the close-valve process after 15 seconds, as it should take just 13 seconds
+   valve_timeout = true;
+  }
+  if (spa_heat_ex_valve_status_closed || valve_timeout) {
+    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+    monitor_valve_closing.disable();
+    valve_motion_start_time = 0;
+    if (print_status_to_serial.getInterval() < five_seconds_in_milliseconds) {
+      print_status_to_serial.setInterval(five_seconds_in_milliseconds);
+    }
+    if (valve_timeout == false) {
+      valve_error = false;           // Reset error flag on successful closing of valve
+    }
+  }
+}
+
+void turn_spa_heater_relay_on(void)
 {
    quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
    spa_heater_relay_on = true;
 }
 
-void turn_spa_heater_relay_off()
+void turn_spa_heater_relay_off(void)
 {
    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
    spa_heater_relay_on = false;
    
 }
-
-bool select_key_pressed = false;
-bool enter_key_pressed = false;
-bool plus_key_pressed = false;
-bool minus_key_pressed = false;
-
-#define PIN_CHANGE_INTERRUPT_VECTOR PCINT2_vect  // PCINT2 covers D4–D7
-volatile unsigned long lastInterruptTime = 0;
-const int debounce_delay = 150;  // 150ms debounce time
 
 void poll_keys_callback(void)
 {
@@ -466,18 +456,11 @@ void poll_keys_callback(void)
   } 
 }
 
-#ifndef POLL_KEYS
-ISR(PIN_CHANGE_INTERRUPT_VECTOR) 
-{
-  poll_keys_callback();
-}
-#endif
-
 // The interrupt routine above will set global variables indicating which keys have been pressed.
 // In this function, we look at those global variables and take action required by the key presses
 // and then reset those global variables.
 
-void process_pressed_keys_callback()
+void process_pressed_keys_callback(void)
 {
   bool some_key_pressed = select_key_pressed | enter_key_pressed | plus_key_pressed | minus_key_pressed;
 
@@ -485,7 +468,7 @@ void process_pressed_keys_callback()
     diag_mode = (diag_mode + 1) % d_last;
     select_key_pressed = false;
     lcd.setCursor(15 /* column */, 0 /* row */);
-    lcd.print(diag_mode_to_string(diag_mode)); 
+    lcd.print(diag_mode_to_string(/* diag_mode */)); 
   }
  
   if (plus_key_pressed) {
@@ -561,41 +544,55 @@ void process_pressed_keys_callback()
   } 
 }
 
-#define MINUTES_TO_MILLISECONDS(x) ((x) * 60UL * 1000UL)
+void turn_solar_pump_on(void)
+{
+  digitalWrite(SSR_SOLAR_PUMP_PIN, LOW); // Turn on solar pump
+  solar_pump_on = true;
+}
 
-#define SOLAR_PUMP_DELAY    MINUTES_TO_MILLISECONDS(5)
-#define HEATER_RELAY_DELAY  MINUTES_TO_MILLISECONDS(5)
-#define SPA_VALVE_DELAY     MINUTES_TO_MILLISECONDS(5)
-#define TAKAGI_DELAY        MINUTES_TO_MILLISECONDS(5)
+void turn_solar_pump_off(void)
+{
+  digitalWrite(SSR_SOLAR_PUMP_PIN, HIGH); // Turn off solar pump
+  solar_pump_on = false;
+}
 
-// This contains the normal basic operational logic of this controller, comparing temperatures
-// and deciding which pumps to turn on, how to set the spa heat exchanger valve, etc.
-
-void frob_relays_callback()
+void monitor_solar_pump_callback(void)
 {
   static unsigned long last_solar_pump_change = 0;
-  static unsigned long last_spa_heater_relay_change = 0;
-  static unsigned long last_spa_valve_change = 0;
-  const unsigned tank_panel_difference_threshold_F = 20;
-  
+  const unsigned tank_panel_difference_threshold_on_F = 20;
+  const unsigned tank_panel_difference_threshold_off_F = 5;
+
   unsigned long current_time = millis();
   
   if (diag_mode == d_oper) {
     if (solar_pump_on == false && temps[panel_e].temperature_valid && temps[tank_e].temperature_valid && 
-    temps[panel_e].temperature_F > (temps[tank_e].temperature_F + tank_panel_difference_threshold_F)) {
+    temps[panel_e].temperature_F > (temps[tank_e].temperature_F + tank_panel_difference_threshold_on_F)) {
       if (last_solar_pump_change == 0 || ((current_time - last_solar_pump_change) > SOLAR_PUMP_DELAY)) {
         turn_solar_pump_on();
         last_solar_pump_change = current_time;
       }
     }
     if (solar_pump_on && temps[panel_e].temperature_valid && temps[tank_e].temperature_valid && 
-          temps[panel_e].temperature_F < temps[tank_e].temperature_F) {
+          temps[panel_e].temperature_F < (temps[tank_e].temperature_F + tank_panel_difference_threshold_off_F)) {
       if (last_solar_pump_change == 0 || (current_time - last_solar_pump_change) > SOLAR_PUMP_DELAY) { 
         turn_solar_pump_off();
         last_solar_pump_change = current_time;
       }  
     }
+  }
+}
+
+// This contains the normal basic operational logic of this controller, comparing temperatures
+// and deciding which pumps to turn on, how to set the spa heat exchanger valve, etc.
+
+void monitor_spa_electric_heat_callback(void)
+{
+  static unsigned long last_spa_heater_relay_change = 0;
   
+  unsigned long current_time = millis();
+  
+  if (diag_mode == d_oper) {
+    
     // If the tank is not warm enough to heat the spa, enable the relay we inserted in the spa controller 
     // that passes the spa's call-for-heat signal to big power relay that controls the spa's electric heater
   
@@ -614,14 +611,24 @@ void frob_relays_callback()
         last_spa_heater_relay_change = current_time;
       }
     }
+  }
+}
+
+void monitor_spa_valve_callback(void)
+  {
+    static unsigned long last_spa_valve_opening = 0;
+    static unsigned long last_spa_valve_closing = 0;
+    unsigned long current_time = millis();
   
+  if (diag_mode == d_oper) {
+
     // If the electric heater is off and the spa is calling for heat, ensure that the spa's heat
     // exchanger pump is on.  
     if (spa_heater_relay_on == false /* we are heating with solar */) {
       if (spa_calling_for_heat && spa_heat_ex_valve_status_open == false) {
-        if (last_spa_valve_change == 0 || ((current_time - last_spa_valve_change) > SPA_VALVE_DELAY)) {
+        if (last_spa_valve_opening == 0 || ((current_time - last_spa_valve_opening) > SPA_VALVE_OPEN_DELAY)) {
           open_spa_heat_exchanger_valve();
-          last_spa_valve_change = current_time;
+          last_spa_valve_opening = current_time;
         }
       } 
     }
@@ -631,9 +638,9 @@ void frob_relays_callback()
       if (spa_heater_relay_on) {
         record_error(F("valve open and heater on"));
       }
-      if (last_spa_valve_change == 0 || (current_time - last_spa_valve_change) > SPA_VALVE_DELAY) {
+      if (last_spa_valve_closing == 0 || (current_time - last_spa_valve_closing) > SPA_VALVE_CLOSE_DELAY) {
         close_spa_heat_exchanger_valve();
-        last_spa_valve_change = current_time;
+        last_spa_valve_closing = current_time;
       }
     }
   }
@@ -674,7 +681,7 @@ void print_status_to_serial_callback(void)
       minute(arduino_time), 
       second(arduino_time), 
       year(arduino_time),
-      diag_mode_to_string(diag_mode),
+      diag_mode_to_string(/* diag_mode */),
       temps[tank_e].temperature_F,
       temps[panel_e].temperature_F,
       temps[spa_e].temperature_F,
@@ -691,7 +698,10 @@ void print_status_to_serial_callback(void)
   Serial.println(buf);
 }
 
-void monitor_serial_console_callback()
+// Called frequently to poll for and act on received console input.  This recognizes characters
+// that correspond to keys on the controller, 's' for select, '+' for the plus key, and '-' for the minus key.
+
+void monitor_serial_console_callback(void)
 {
   char command_buf[3];
   command_buf[0] = '\0';
@@ -744,12 +754,11 @@ void print_2_digits_to_lcd(int number)
 
 // This is called several times a second and updates the LCD display with the latest values and status.
 
-void update_lcd_callback()
+void update_lcd_callback(void)
 {
   if (second(arduino_time) > 3) {
     char cbuf[21];
     char valve_cbuf[5];
-
     
     lcd.setCursor(0 /* column */, 0 /* row */);
     if (valve_motion_start_time > 0) {
@@ -768,7 +777,7 @@ void update_lcd_callback()
       valve_cbuf,
       valve_timeout ? 'T' : '-',
       valve_error ? 'E' : '-',
-      diag_mode_to_string(diag_mode));
+      diag_mode_to_string(/* diag_mode */));
     lcd.print(cbuf);
    
     lcd.setCursor(0, 1);
@@ -785,14 +794,23 @@ void update_lcd_callback()
   }
 }
 
+void turn_recirc_pump_on(void) 
+{
+  recirc_pump_on = true;
+  digitalWrite(SSR_RECIRC_PUMP_PIN, LOW); // Ground the low side of the SSR, turning on recirculation pump
+}
+
+void turn_recirc_pump_off(void) 
+{
+  recirc_pump_on = false;
+  digitalWrite(SSR_RECIRC_PUMP_PIN, HIGH); // Un-Ground the low side of the SSR, turning off recirculation pump
+}
 
 // This controls the recirculation pump SSR and is currently simple, it just runs for one minute every 30 minutes
 // between 8AM and 11PM.
 
-void control_recirc_pump_callback()
+void monitor_recirc_pump_callback(void)
 {
-  static unsigned long last_takagi_change = 0;
-
   unsigned h = hour(arduino_time);
   unsigned m = minute(arduino_time);
   
@@ -812,24 +830,43 @@ void control_recirc_pump_callback()
       }
     }
   }
-  if (takagi_on && temps[tank_e].temperature_valid && temps[tank_e].temperature_F >= takagi_off_threshold_F) {
-    unsigned long current_time = millis();
-    if (last_takagi_change == 0 || (current_time - last_takagi_change) > TAKAGI_DELAY) {
-        turn_takagi_off();
+}
+
+void turn_takagi_on(void)
+{
+  digitalWrite(SSR_TAKAGI_PIN, LOW); // Turn on Takagi flash heater
+  takagi_on = true;
+}
+
+void turn_takagi_off(void)
+{
+  digitalWrite(SSR_TAKAGI_PIN, HIGH); // Turn off Takagi flash heater
+  takagi_on = false;
+}
+
+void monitor_takagi_callback(void)
+{
+  static unsigned long last_takagi_change = 0;
+
+  if (diag_mode == d_oper) {
+    if (takagi_on && temps[tank_e].temperature_valid && temps[tank_e].temperature_F >= takagi_off_threshold_F) {
+      unsigned long current_time = millis();
+      if (last_takagi_change == 0 || (current_time - last_takagi_change) > TAKAGI_DELAY) {
+          turn_takagi_off();
+          last_takagi_change = current_time;
+        }
+    } else if (takagi_on == false && temps[tank_e].temperature_valid && temps[tank_e].temperature_F <  takagi_on_threshold_F) {
+      unsigned long current_time = millis();
+      if (last_takagi_change == 0 || (current_time - last_takagi_change) > TAKAGI_DELAY) {
+        turn_takagi_on();
         last_takagi_change = current_time;
       }
-  } else if (takagi_on == false && temps[tank_e].temperature_valid && temps[tank_e].temperature_F <  takagi_on_threshold_F) {
-    unsigned long current_time = millis();
-    if (last_takagi_change == 0 || (current_time - last_takagi_change) > TAKAGI_DELAY) {
-      turn_takagi_on();
-      last_takagi_change = current_time;
     }
   }
 }
 
-
 // Once an hour, read the RTC and set Arduino time based on it.
-void monitor_clock_callback()
+void monitor_clock_callback(void)
 {
   arduino_time = now();
   
@@ -865,7 +902,7 @@ void monitor_clock_callback()
   }
 }
 
-void setup_arduino_pins()
+void setup_arduino_pins(void)
 {
   pinMode(KEY_1_PIN, INPUT_PULLUP);
   pinMode(KEY_2_PIN, INPUT_PULLUP);
@@ -880,7 +917,7 @@ void setup_arduino_pins()
   pinMode(LED_BUILTIN, OUTPUT); 
 }
 
-void setup_lcd()
+void setup_lcd(void)
 {
   Wire.beginTransmission(SERLCD_I2C_ADDR);
   Wire.write(0x7C);      // Special command indicator
@@ -903,7 +940,7 @@ void setup_lcd()
   lcd.print(F(__TIME__));         // Display this on the third row, left-adjusted
 }
 
-void setup_i2c_bus()
+void setup_i2c_bus(void)
 {
   {
     byte error, address;
@@ -975,7 +1012,7 @@ void setup_i2c_bus()
   }
 }
 
-void setup_rtc()
+void setup_rtc(void)
 {
   // If we fail to communicate with the RTC (a DS3231), set the time and date to the build time of this software.
   if(!rtc.begin()) {
@@ -1047,7 +1084,7 @@ void setup_rtc()
    pin modes of the ATMEGA correctly as inputs or outputs.  We also fetch values from EEPROM for use during
    our operation and emit a startup message.
 */
-void setup()
+void setup(void)
 {
   delay(1000); // In case something further along crashes and we restart quickly, this will give a one-second pause
 
@@ -1126,7 +1163,7 @@ void setup()
 /*
    This is the function that the Arduino run time system calls repeatedly after it has called setup().
 */
-void loop()
+void loop(void)
 {
   // All code after setup() executes inside of tasks, so the only thing to do here is to call the task scheduler's execute() method.
   ts.execute();
