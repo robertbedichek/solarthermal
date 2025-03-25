@@ -3,7 +3,7 @@
    This controls:
       An SSR that controls a 120VAC water pump that moves water from the tank to the panels (and back)
       An SSR that controls the 120VAC water pump that recirculates hot water through our home
-      An SSR that controls our Takagi natural-gas-fired domestic water heater
+      An SSR that controls our taka natural-gas-fired domestic water heater
         The Takagi is fed by water that first goes through a heat exchanger in a 4000 pound thermal mass (water)
       A 12V signal that powers a small 12V relay added to the spa controller that enables the electrical spa heater (the "native" heater for the spa)
 
@@ -104,6 +104,8 @@ Scheduler ts;
 #define SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN   (10)  // Green wire from the Solid Valve, which goes to Green CAT5. Valve is open when this is a zero
 #define SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN (3)  // Red wire on Solid valve, which goes to Orange CAT5.  Valve is closed when this is zero.
 
+typedef enum {d_oper, d_rpump, d_spump, d_takagi, d_spa_hex_valve, d_spa_elec, d_last} diag_mode_t;
+
 void monitor_valve_closing_callback(void);
 void monitor_valve_opening_callback(void);
 void read_time_and_sensor_inputs_callback(void);
@@ -134,7 +136,7 @@ struct temperature_s {
   int upper_bound_F;
 } temps [last_temp_e];
 
-Task read_time_and_sensor_inputs(1000, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
+Task read_time_and_sensor_inputs(TASK_SECOND, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
 /*****************************************************************************************************/
 // We have two options for how to recognize pressing of one of the four keys.  One is to rapidly poll
 // the state of the digital input pins to which the keys are connected.  The other is to enable any-input-change
@@ -169,8 +171,9 @@ volatile unsigned long lastInterruptTime = 0;
 const int debounce_delay = 150;  // 150ms debounce time
 /*****************************************************************************************************/
 const unsigned long one_second_in_milliseconds = 1000;
-const unsigned one_minute_in_milliseconds = 60000;
-const unsigned five_seconds_in_milliseconds = 5000;
+const unsigned long five_seconds_in_milliseconds = 5 * one_second_in_milliseconds;
+const unsigned long one_minute_in_milliseconds = 60 * one_second_in_milliseconds;
+const unsigned long five_minutes_in_milliseconds = 5 * one_minute_in_milliseconds;
 
 // We vary the frequency of status lines sent to the serial output from once per second when we are opening
 // or closing the spa heat exchanger valve, to five seconds during start up, to once per minute during normal
@@ -193,6 +196,7 @@ bool valve_timeout = false;         // True if it takes too long to open or clos
 
 bool valve_error = false;           // True if the spa valve control API is called in a way that it does not expect
                                     // Reset to false on next completed valve operation
+unsigned daily_valve_cycles;        // Number of valve-open operations per day
 
 // These two booleans represent the latest values sensed from the valve itself.  
 
@@ -211,23 +215,33 @@ Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callba
 #define SOLAR_PUMP_DELAY       MINUTES_TO_MILLISECONDS(20)
 
 bool solar_pump_on = false;         // True if we are powering the solar tank hot water pump
-
-bool takagi_on = true;              // True if we are powering the Takagi flash heater
-const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
-const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
+unsigned daily_minutes_of_solar_pump_on_time;
 
 Task monitor_solar_pump(TASK_SECOND * 60, TASK_FOREVER, &monitor_solar_pump_callback, &ts, true);
 /*****************************************************************************************************/
 bool spa_heater_relay_on = false;   // True if we have enabled the spa heater relay
 #define HEATER_RELAY_DELAY     MINUTES_TO_MILLISECONDS(30)
-
+unsigned daily_minutes_of_spa_heater_on_time;
 Task monitor_spa_electric_heat(TASK_SECOND * 60, TASK_FOREVER, &monitor_spa_electric_heat_callback, &ts, true);
 /*****************************************************************************************************/
 bool recirc_pump_on = false;        // True if we are powering the recirculation pump
 
+void turn_recirc_pump_on(void);
+void turn_recirc_pump_off(void);
+
 Task monitor_recirc_pump(TASK_SECOND * 10, TASK_FOREVER, &monitor_recirc_pump_callback, &ts, true);
 /*****************************************************************************************************/
 #define TAKAGI_DELAY           MINUTES_TO_MILLISECONDS(30)
+
+bool takagi_on = false;              // True if we are powering the Takagi flash heater
+const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
+const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
+
+void turn_takagi_on(void);
+void turn_takagi_off(void);
+
+unsigned daily_minutes_of_takagi_on_time;
+
 Task monitor_takagi(TASK_SECOND * 60, TASK_FOREVER, &monitor_takagi_callback, &ts, true);
 /*****************************************************************************************************/
 //   All the operational code uses this time structure.  This is initialized at start time from the battery-backed up DS3231 RTC.
@@ -235,7 +249,6 @@ time_t arduino_time;
 
 Task monitor_clock(TASK_SECOND * 3600, TASK_FOREVER, &monitor_clock_callback, &ts, true);
 /*****************************************************************************************************/
-typedef enum {d_oper, d_rpump, d_spump, d_takagi, d_spa_hex_valve, d_spa_elec, d_last} diag_mode_t;
 diag_mode_t diag_mode;
 
 unsigned long time_entering_diag_mode = 0;
@@ -301,11 +314,11 @@ void read_time_and_sensor_inputs_callback(void)
 // in the diag mode, but since we always passed in the global variable "diag_mode", just commenting out
 // the parameter here, and the passed arguments where this is called allowed this to compile again.
 
-const char *diag_mode_to_string(void) 
+const char *diag_mode_to_string(diag_mode_t dm) 
 {
   char *s[] = {"Oper", "D-RP", "D-SP", "D-TK", "D-HX", "D-EL"};
-  if (diag_mode < d_last) {
-    return s[diag_mode];
+  if (dm < d_last) {
+    return s[dm];
   }
   return "ERR";
 }
@@ -468,7 +481,7 @@ void process_pressed_keys_callback(void)
     diag_mode = (diag_mode + 1) % d_last;
     select_key_pressed = false;
     lcd.setCursor(15 /* column */, 0 /* row */);
-    lcd.print(diag_mode_to_string(/* diag_mode */)); 
+    lcd.print(diag_mode_to_string(diag_mode)); 
   }
  
   if (plus_key_pressed) {
@@ -650,12 +663,48 @@ void monitor_spa_valve_callback(void)
 //  Sends relevant telemetry back over the USB-serial link.
 void print_status_to_serial_callback(void)
 {
+  char buf[91];  // Current output string is 89 characters
   static char line_counter = 0;
-  
+  static bool daily_stats_printed = false;
+  int h = hour(arduino_time);
+  int m = minute(arduino_time);
+  if (h == 0 && !daily_stats_printed) {;
+    sprintf(buf, sizeof(buf), "# build: %s %s\n", __DATE__, __TIME__);
+    Serial.println(buf);
+
+    snprintf(buf, sizeof(buf), "# daily %u %u #u #u", 
+      daily_valve_cycles, 
+      daily_minutes_of_solar_pump_on_time,
+      daily_minutes_of_spa_heater_on_time, 
+      daily_minutes_of_takagi_on_time);
+
+    Serial.println(buf);
+    daily_valve_cycles = 0;
+    daily_minutes_of_solar_pump_on_time = 0;
+    daily_minutes_of_spa_heater_on_time = 0;
+    daily_minutes_of_takagi_on_time = 0;
+    daily_stats_printed = true;
+  }
+  // Reset the flag in the hour before we are to emit the stats.  We could reset this any time after the first hours.
+  if (h == 23) {
+    daily_stats_printed = false;
+  }
   if (line_counter == 0) {
-    if (print_status_to_serial.getInterval() < one_minute_in_milliseconds && millis() > 1000L * 60L * 10L) { 
-      // After ten minutes, reduce the frequency of the output to once per minute
-      print_status_to_serial.setInterval(one_minute_in_milliseconds);
+    if (millis() > 1000L * 60L * 10L) {
+      unsigned long interval = print_status_to_serial.getInterval();
+      int h = hour(arduino_time);
+      bool quiet_time = h >= 23 || h <= 8;
+      if (interval < one_minute_in_milliseconds) { 
+        // After ten minutes, reduce the frequency of the output to once per minute
+        print_status_to_serial.setInterval(one_minute_in_milliseconds);
+      } else {
+        // During quiet times of not much activity, emit telemetry more slowly
+        if (quiet_time && interval < five_minutes_in_milliseconds) {
+          print_status_to_serial.setInterval(five_minutes_in_milliseconds);
+        } else if (!quiet_time && interval >= five_minutes_in_milliseconds) {
+          print_status_to_serial.setInterval(one_minute_in_milliseconds);
+        }
+      }
     }
 
     Serial.println(F("# Date     Time Year Mode Tank Panel SpaT SpaH Spump Rpump Taka Call Open Clsd Time Erro"));
@@ -673,15 +722,15 @@ void print_status_to_serial_callback(void)
 // Feb 21 13:04:33 2025  649   47   84    46    1     1     0    1
 // Feb 21 13:04:38 2025  649   40   78    40    1     1     0    1
 
-  char buf[101];  // Current output string is 89 characters, plus \0, one extra for good luck.
+  
   snprintf(buf, sizeof(buf), "%s %d %02d:%02d:%02d %4d %s %4d %4d  %4d %4d  %4d  %4d %4d %4d %4d %4d %4d %4d", 
       monthShortStr(month(arduino_time)), 
       day(arduino_time), 
-      hour(arduino_time),
-      minute(arduino_time), 
+      h,
+      m, 
       second(arduino_time), 
       year(arduino_time),
-      diag_mode_to_string(/* diag_mode */),
+      diag_mode_to_string(diag_mode),
       temps[tank_e].temperature_F,
       temps[panel_e].temperature_F,
       temps[spa_e].temperature_F,
@@ -777,7 +826,7 @@ void update_lcd_callback(void)
       valve_cbuf,
       valve_timeout ? 'T' : '-',
       valve_error ? 'E' : '-',
-      diag_mode_to_string(/* diag_mode */));
+      diag_mode_to_string(diag_mode));
     lcd.print(cbuf);
    
     lcd.setCursor(0, 1);
@@ -1088,7 +1137,6 @@ void setup(void)
 {
   delay(1000); // In case something further along crashes and we restart quickly, this will give a one-second pause
 
-
   temps[tank_e].input_pin = A0;  // Measures the voltage from the LM35 glued to the tank
   temps[tank_e].sensor_type = lm36_e;
   temps[tank_e].calibration_offset_F = 7; // Calibrated by comparing with 18B20 on tank for years
@@ -1124,9 +1172,6 @@ void setup(void)
  
   digitalWrite(SSR_SOLAR_PUMP_PIN, HIGH);
   digitalWrite(SSR_RECIRC_PUMP_PIN, HIGH);
-
-  takagi_on = true;
-  digitalWrite(SSR_TAKAGI_PIN, LOW); // Turn on Takagi
 
   setup_lcd();
   delay(500);
