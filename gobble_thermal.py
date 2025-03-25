@@ -2,6 +2,17 @@
 
 import serial
 import time
+import subprocess
+
+GNUPLOT_SCRIPT = "solarthermal.gnuplot"
+GNUPLOT_INTERVAL = 1800  # seconds
+
+SCP_COMMAND = [
+    "/usr/bin/env", "scp",
+    "-i", "/Users/robertbedichek/.ssh/id_rsa",
+    "/Users/robertbedichek/Documents/Arduino/solarthermal/solarthermal.png",
+    "root@bedichek.org:/var/www/home"
+]
 
 port = "/dev/tty.usbserial-11240"   # Replace with your actual port
 baud_rate = 115200
@@ -14,6 +25,10 @@ time.sleep(1)
 ser.setDTR(True)
 linecount = 0
 
+# Track when we last ran gnuplot
+last_gnuplot_time = time.time()
+
+
 print(f"Connected to {port}. Reading data...\n")
 
 with open("solarthermal_log.txt", "a", buffering=1) as f:
@@ -24,6 +39,24 @@ with open("solarthermal_log.txt", "a", buffering=1) as f:
         f.write(line + "\n")
         f.flush()
         linecount += 1
+# Check if an hour has passed
+        current_time = time.time()
+        if current_time - last_gnuplot_time >= GNUPLOT_INTERVAL:
+          print("Running gnuplot...")
+          try:
+            subprocess.run(["/opt/homebrew/bin/gnuplot", GNUPLOT_SCRIPT], check=True)
+            print("gnuplot finished.")
+          except subprocess.CalledProcessError as e:
+            print(f"gnuplot error: {e}")
+
+          print("Running scp ...")
+          try:
+            subprocess.run(SCP_COMMAND, check=True)
+            print("ssh finished.")
+          except subprocess.CalledProcessError as e:
+            print(f"ssh error: {e}")
+
+          last_gnuplot_time = current_time
 
   except KeyboardInterrupt:
     print(f"Stopping after reading and logging {linecount} lines.")
