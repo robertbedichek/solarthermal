@@ -204,28 +204,28 @@ bool spa_heat_ex_valve_status_open = false;
 bool spa_heat_ex_valve_status_closed = false;
 bool spa_calling_for_heat = false;  // True if the spa is signalling that it wants heat
 
-#define SPA_VALVE_OPEN_DELAY   MINUTES_TO_MILLISECONDS(30)
-#define SPA_VALVE_CLOSE_DELAY  MINUTES_TO_MILLISECONDS(30)
+#define SPA_VALVE_OPEN_DELAY   MINUTES_TO_MILLISECONDS(2)
+#define SPA_VALVE_CLOSE_DELAY  MINUTES_TO_MILLISECONDS(2)
 
-Task monitor_valve_closing(500, TASK_FOREVER, &monitor_valve_closing_callback, &ts, false);
-Task monitor_valve_opening(500, TASK_FOREVER, &monitor_valve_opening_callback, &ts, false);
+Task monitor_valve_closing(200, TASK_FOREVER, &monitor_valve_closing_callback, &ts, false);
+Task monitor_valve_opening(200, TASK_FOREVER, &monitor_valve_opening_callback, &ts, false);
 Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callback, &ts, true);
 /*****************************************************************************************************/
 #define MINUTES_TO_MILLISECONDS(x) ((x) * 60UL * 1000UL)
 #define SOLAR_PUMP_DELAY       MINUTES_TO_MILLISECONDS(20)
 
 // The panels must be at least this much hotter than the tank to turn on the solar pump
-const unsigned tank_panel_difference_threshold_on_F = 20;
+const unsigned tank_panel_difference_threshold_on_F = 10;
 
 // When the panels drop to being just this much hotter than the tank, turn off the solar pump
-const unsigned tank_panel_difference_threshold_off_F = -5; // Keep running pump until panels 5F colder than tank
+const unsigned tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels 5F colder than tank
 bool solar_pump_on;                 // True if we are powering the solar tank hot water pump
 unsigned long solar_pump_on_time;   // Set to millis() / 1000 when pump is turned on
 unsigned daily_seconds_of_solar_pump_on_time; // Number of seconds the solar pump has run today
 
 Task monitor_solar_pump(TASK_SECOND * 60, TASK_FOREVER, &monitor_solar_pump_callback, &ts, true);
 /*****************************************************************************************************/
-bool spa_heater_relay_on = false;   // True if we have enabled the spa heater relay
+bool spa_heater_relay_on = false;   // True if we have enabled the spa heater relay, off by default
 #define HEATER_RELAY_DELAY     MINUTES_TO_MILLISECONDS(30)
 unsigned daily_seconds_of_spa_heater_on_time;
 unsigned spa_heater_relay_on_time;   // Set to millis() / 1000 when heater is switched on
@@ -312,7 +312,6 @@ void read_time_and_sensor_inputs_callback(void)
     t->temperature_F = (temp_C * (90.0 / 50.0)) + 32.0 + t->calibration_offset_F;
     t->temperature_valid = t->temperature_F >= t->lower_bound_F && t->temperature_F <= t->upper_bound_F;
   }
-  
   spa_calling_for_heat = digitalRead(SPA_HEAT_DIGITAL_IN_PIN) == HIGH;
 
   spa_heat_ex_valve_status_open = digitalRead(SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN) == LOW;
@@ -343,8 +342,6 @@ void monitor_diag_mode_callback(void)
     monitor_diag_mode.disable();
   }
 }
-
-
 
 // This intiates the valve opening process by applying the correct polarity of power to the valve motor
 // and by enabling the task that monitors the opening process.
@@ -422,20 +419,6 @@ void monitor_valve_closing_callback(void)
       valve_error = false;           // Reset error flag on successful closing of valve
     }
   }
-}
-
-void turn_spa_heater_relay_on(void)
-{
-  spa_heater_relay_on_time = millis() / 1000;
-  quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
-  spa_heater_relay_on = true;
-}
-
-void turn_spa_heater_relay_off(void)
-{
-  daily_seconds_of_spa_heater_on_time += (millis()/1000) - spa_heater_relay_on_time;
-  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
-  spa_heater_relay_on = false;
 }
 
 void poll_keys_callback(void)
@@ -567,9 +550,6 @@ void turn_solar_pump_off(void)
 void monitor_solar_pump_callback(void)
 {
   static unsigned long last_solar_pump_change = 0;
-  const unsigned tank_panel_difference_threshold_on_F = 20;
-  const unsigned tank_panel_difference_threshold_off_F = 5;
-
   unsigned long current_time = millis();
   
   if (diag_mode == d_oper) {
@@ -588,6 +568,20 @@ void monitor_solar_pump_callback(void)
       }  
     }
   }
+}
+
+void turn_spa_heater_relay_on(void)
+{
+  spa_heater_relay_on_time = millis() / 1000;
+  quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+  spa_heater_relay_on = true;
+}
+
+void turn_spa_heater_relay_off(void)
+{
+  daily_seconds_of_spa_heater_on_time += (millis()/1000) - spa_heater_relay_on_time;
+  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+  spa_heater_relay_on = false;
 }
 
 // This contains the normal basic operational logic of this controller, comparing temperatures
@@ -620,13 +614,14 @@ void monitor_spa_electric_heat_callback(void)
       }
     }
   }
+  
 }
 
 void monitor_spa_valve_callback(void)
   {
-    static unsigned long last_spa_valve_opening = 0;
-    static unsigned long last_spa_valve_closing = 0;
-    unsigned long current_time = millis();
+    static unsigned last_spa_valve_opening = 0;
+    static unsigned last_spa_valve_closing = 0;
+    unsigned long current_time = millis() / 1000;
   
   if (diag_mode == d_oper) {
 
@@ -651,6 +646,12 @@ void monitor_spa_valve_callback(void)
         last_spa_valve_closing = current_time;
       }
     }
+  }
+  if (!spa_heater_relay_on && spa_heat_ex_valve_status_open && last_spa_valve_opening != 0 && (current_time - last_spa_valve_opening) > 3600) {
+    Serial.print(F("# Spa valve open for an hour, must have failed"));
+    valve_error = true;
+    // Since we are warming the spa with the thermal-mass heat, turn on the electric heater
+    turn_spa_heater_relay_on();
   }
 }
 
@@ -1206,8 +1207,9 @@ void setup(void)
   quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
   quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
 
-  // By default, the spa electric heater should be able to heat the spa
-  quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+  // By default, the spa electric heater is unpowered.  If the tank is too
+  // cold, it will quickly be turned back on.
+  quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
 
   setup_rtc();
 
