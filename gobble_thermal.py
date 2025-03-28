@@ -28,6 +28,7 @@ linecount = 0
 # Track when we last ran gnuplot
 last_gnuplot_time = time.time()
 
+first_time = True
 
 print(f"Connected to {port}. Reading data...\n")
 
@@ -41,7 +42,8 @@ with open("solarthermal_log.txt", "a", buffering=1) as f:
         linecount += 1
 # Check if an hour has passed
         current_time = time.time()
-        if current_time - last_gnuplot_time >= GNUPLOT_INTERVAL:
+        if first_time or (current_time - last_gnuplot_time >= GNUPLOT_INTERVAL):
+          first_time = False
           print("Running gnuplot...")
           try:
             subprocess.run(["/opt/homebrew/bin/gnuplot", GNUPLOT_SCRIPT], check=True)
