@@ -1,0 +1,202 @@
+
+
+# Solar-Thermal System
+
+## Overview
+
+This project is composed of code, control logic that run the code, pumps, and plumbing.  The purpose of the system is to use the sun to heat water.  At the center of the system is an insulated water tank, which serves as a thermal mass, with two heat exchangers.  The tank measures four feet on a side and holds about 4,000 pounds of water. A water pump, called the "solar pump" in the code, pushes water up to copper solar panels that are mounted on a south-facing roof.  There are temperature sensors in one of the panels, on the side of the tank, and in the spa.  When the code senses that the panels are warm enough, it turns on the solar pump, which causes the thermal mass to warm.
+
+The two heat exchangers are immersed in this thermal mass water.  One heat exchanger is made from 1" copper tubing and carries domestic water that is heated by passing through this heat exchanger.  The heated water then passes through a Takagi natural-gas fired flash heater before it is distributed for use in our home.  If the thermal mass is warm enough that it alone can heat the domestic hot water sufficiently, the controller turns off the Takagi.  Otherwise, the Takagi provides whatever increase in heating is needed. By heating the water before it passes through the Takagi, the Takagi will consume less natural gas.  I expect that from mid March through mid October, the Takagi will be off 99% of the time.
+
+The other heat exchanger that is immersed in the solar mass water is made from 1/2" stainless steel tubing and carries water from our spa.  A valve I added to the spa allows spa water to travel through this heat exchanger.  When the code detects that the spa is warm enough that it can be heated solely with the thermal mass, it disables the spa's own electric heater.  When the code senses that the spa is trying to turn on its own heater, i.e., that is is "calling for heat", the controller opens the valve, which allows the spa water to pass through the heat exchanger (and return to the spa several degrees warmer).
+
+The system also controls a recirculation pump that pushes water through the hot water pipes during the day and early evening.  This is a convenience as it means that hot water will be available more readily when needed.  It also saves water because little water needs to run before the hot water taps supply sufficiently warm water for use.
+
+## Telemetry
+
+The controller emits lines of text through a USB serial connection to a Mac mini.  Here are a few sample lines with a header that is emitted periodically.
+
+
+***
+
+
+```Mar 26 15:07:25 2025 Oper  141  143   111    0     1     0    0    0    0    1    0    0
+Mar 26 15:07:33 2025 Oper  140  143   111    0     1     0    0    0    0    1    0    0
+# Mar 26 15:07:34 2025 solarthermal 14 8622 0 0 built: Mar 26 2025 12:41:31  
+# Date     Time Year Mode Tank Panel SpaT  SpaH Spump Rpump Taka Call Open Clsd Time Erro
+Mar 26 15:07:34 2025 Oper  141  143   111    0     1     0    0    0    0    1    0    0
+Mar 26 15:07:42 2025 Oper  140  143   111    0     1     0    0    0    0    1    0    0
+```
+***
+This shows the month, date, time, and year followed by the mode the controller is in.  Next are the temperatures in Fahrenheit  of the tank, one of the panels, and the spa.  There there are nine booleans: whether the spa's electric heater is enabled, whether the solar pump is on, whether the recirculation pump for domestic hot water is on, whether the Takagi is powered, whether the spa is calling for heat, whether the spa valve is open or closed, whether there's been a valve operation that timed out, and whether there is been some error in the way the valve API was called.
+
+This data is captured by the Python script "gobble_solarthermal.py" that runs on the Mac mini host (when I'm not connected via the Arduino IDE).  This script absorbs the emitted lines and writes them to a log file "solarthermal_log.txt".  Every 30 minutes, it runs gnuplot on the log file, which generates an PNG.  It then uses scp to copy this PNG to a server.  You can see the result here:
+
+[Telemetry from my home](https://bedichek.org/home)
+
+## Picture of Spa and Tank
+
+This shows the spa, a Hotsprings Vanguard, in the foreground, the thermal mass after the first application of closed-cell spray-foam insulation, and the 1/2" PEX lines from the thermal mass's heat exchanger for the Spa.  This picture shows a test where a small DC pump took water from the spa, pumped it through the heat exchanger, and returned it to the spa.  This PEX lines were subsequently insulated and routed underneath the Epe decking between the spa and home.  I replaced the small pump with a valve as the spa's own recirculation pump created sufficient pressure to push the water through the heat exchanger.  This pump would push water through the small DC pump even when it was unpowered, so the system needed a valve in any case.
+
+At the top of the frame, the thermal solar panels are visible.
+
+![Spa and thermal mass](https://github.com/user-attachments/assets/d4833e7b-d43a-4a73-9269-407808cea71a)
+
+## The Controller
+
+The core of the controller is a Sparkfun Arduino Redboard with Qwiic connectors for convenient connection to Qwiic peripherals.  The first three analog inputs of the Arduino measure voltages from LM36 and LM337 temperature sensors.  The tank and spa sensors are LM36s and the panel is an LM337.  Digital inputs sense the four keys used for maintenance operations, whether the spa is calling for heat, and the position of the motorized valve added to the spa.  Digital outputs control three SSRs (solid state relays) those in turn control 120VAC power to the solar pump, the recirculation pump, and the Takagi water heater.
+
+Via the I2C interface, using the Qwiic connector system, the controller talks to an LCD text display (4x20 characters) and a relay board.  Also through I2C, but plugged directly into the Arduino, is an Adafruit DS3231 Real Time Clock.  The relay board has four relays, three of which are used in this design.  Relays two and three control the 12VDC power to the valve motor (a US Solid 1/2" stainless steel motorized ball valve).  Relay four, when energized, enables another 12VDC relay I added to the spa's controller that allows the spa to power its electric heater.  It does this by gating the 12VDC from the spa's controller to the spa's heavy-current relay that controls the 240VAC power to the spa's electric heater.  Thus, the changes to the spa were only in the low voltage section and the only modification to the spa's controller was to snip the low-voltage and low-current wire leading to the 12VDC coil of the spa's heater relay.
+
+## Solar-Thermal Controller Pictures
+
+This image shows the solar-thermal controller.  The display indicates:
+
+1. The time of day
+2. The valve is 5 seconds into a manual open operation
+3. The mode is diagnostic-heat-exchanger-valve
+4. The tank is 118F, Panel 148F, and the spa is 104F
+5. The recirculation pump is off (denoted by a minus sign)
+6. The solar pump is on (denoted by a plus sign)
+7. The spa's electric heater is not enabled
+8. The spa is calling for heat
+
+The red LED on the upper left is part of the opto-isolator for the "calling for heat" signal. I used an opto-isolator to ensure that the grounds of the controller and the spa were not shared and could be at different potentials.  The blue CAT5 on the left connects this controller to the modifications in the spa's controller (see image of the spa).  The black dongle on the right of the frame connects a pair of long-distance USB transceivers to allow me to debug and monitor this controller from a Mac mini in another part of my home more suited to housing sensitive electronics.
+
+![](https://github.com/user-attachments/assets/570b2c90-aab1-4158-b577-85fc7940a3a2)
+## Spa Pictures
+
+This image shows:
+
+1. The spa's recirculation pump (to the right of the blue US Solid valve)
+2. The PVC T fitting added to the spa's vinyl tubing, reinforced with 1/2" PVC pipe zip-tied to the tubing
+3. Foam tape wrapped around the fitting and the tubing, to keep the LM35 temperature sensor as close to spa water temperature as possible
+4. The US Solid motorized valve that allows some of the water from the output of the recirculation pump to travel through the heat exchanger in the thermal mass.
+5. The two CAT5 cables that go between the spa and the solar-thermal controller.
+    a. The blue CAT5 terminates inside of the spa controller's box and carries the "calling for heat" signal from spa to solar-thermal controller and the "electric heater enable" signal from the solar-thermal controller to the spa
+    b. The grey CAT5 terminates in the upper left side of the frame and has three wires for the LM35 (ground, +5VDC, and signal) and five for the US Solid valve (two for the valve motor, three for the position sensing)
+![Spa plumbing and electronics (front cover removed)](https://github.com/user-attachments/assets/1718bbb4-8a27-4b5e-90d1-048f64ce9321)
+
+This picture shows the tiny relay board that is powered by the solar-thermal controller (not the spa) and controls 12VDC power to the high-current relay in the upper left that feeds the electric heater.  When this relay is unpowered, the flow of current to the coils of this heater relay is interrupted and the spa's electric heater will not come on.  A pair of wires (the orange and orange/white pair in the  blue CAT5) from the solar-thermal controller drive this tiny relay board.  Another pair of wires (the blue and blue/white pair in the same blue CAT5) send to the solar-thermal controller 12VDC when the spa is calling for heat and 0V when it is not.  This pair terminates at the input of an onto-isolator in the solar-thermal controller.  The output of this onto-isolator goes to a digital input pin of the Arduino which is configured with a pull-up.  When the spa is calling for heat, this pin reads 0 (or "LOW" in the code, when it is not, it reads non-zero ("HIGH" in the code).
+
+![Modified Spa Controller](https://github.com/user-attachments/assets/4e254e2f-1a94-48de-bf05-52f43dc06018)
+
+Here is the same modification, but tucked a plastic pouch and placed in the upper right where there is space and not components that are likely to get too hot.
+
+![Spa controller with modifications](https://github.com/user-attachments/assets/34078d71-75d8-4df6-85c7-5ba69fbcc931)
+
+There is black plastic cover that protects the spa's controller and of course that is in place normally.  Caution to those who might want to modify their spa controllers in a similar way: be sure to shut off power to the spa before modifying it and, of course, you'll be voiding your warranty for the spa, or at least with any problems you might have with the controller.  I did not consult Hot Springs nor did I get any documentation to help me in this modification.  I just traced wires, read the ECB silkscreened labels, and measured voltages.
+
+## History
+
+I built the system in 2009 with four solar-thermal panels that were being sold for scrap metal.  Initially, there was no thermal mass and the panels just heated pool water.  After the pool (17,000 gallons) reached 98F one July evening, I sought to take better advantage of the surplus solar-thermal power.  A test system using a horse trough from a feed supply store as a thermal mass had a positive result.  I found two 4'x8' sheets of 11 gauge stainless steel that were surplus and had a firm bend the pieces in half, weld them together, and weld an additional 4'x4' side to make an open box.  This firm also welded six threaded 1" stainless steel bungs.  Four of these pass-through bungs were for heat exchangers, one for the drain, and one for the water return (from the panels).  The tank drain bung feeds a maintenance drain as well as the solar pump inlet.  One of the heat exchangers was for the domestic hot water and one was for floor hydronic heating.  The floor heating did not work well as the time of the year when it is needed the most was also when there was little spare thermal energy.  For 15 years, the system produced domestic hot water.  
+
+The system also has a pair of motorized three-way valves that allow the solar panels to take water from either the thermal mass or from our pool and to return the heated water to either the thermal mass or the pool.  Naturally, a key design goal was to ensure that the valves stayed in sync and would only return water to the pool when the source was the pool and to return water to the thermal mass when the source was the thermal mass.  There is also a three way valve near the pool pump that either sends the pumped and filtered pool water back to the pool (normal operation) or diverts the flow to send the water to the solar panels. The algorithm to control all of this ran on a Mac mini and was coded in Python.  I used Phidgets USB relay boxes, which were highly problematic in their interactions with the Mac mini.  However, the system worked for a number of years.  In designing the system I describe here, I wanted to get away from having a complex computer control things in my home.  I still have a Mac mini, but it only is used for development and for gathering and forwarding telemetry.  Once I see this new system work well, I may extend it to control the roof three-way valves and the diverter valve near the pool pumps.
+
+In late 2024 I constructed a better roof for the thermal mass and before installing it, I checked for leaks in the tank.
+
+The tank had many leaks.  I believe that these were the result of the stick welding used by the firm that fabricated the tank.  This welding was done improperly, with too much heat, that drove the chromium out of the stainless steel.  Over the years, this weakness, combined with the hot water that the tank holds, caused many seeps, or slow leaks.  In late 2024, I removed the insulation and heat exchangers and refinished the tank.  I welded new sections in some places, but there were too many leaks to fix that way.  I turned to using epoxy and had to go through several different types of epoxy and several passes of application.  The epoxy should protect the (damaged) stainless steel from further corrosion.  In addition, I installed an active (i.e., powered) cathodic protection device and added an anti-corrosion additive to the thermal mass water.
+
+I did not re-install the floor-heating heat exchanger, but did install a new stainless steel tube to form a heat exchanger for the spa.  I placed that heat exchanger's ports at the top of the tank on the side closest to the spa.  By being on the top, they are just above the water line so that if there is a leak between the inside of the tank and the outside, where these water lines go through the tank, it won't matter because the tank water level will be slightly lower than where these penetrations are.
+
+## Parts List
+
+Controller:
+
+1. SparkFun RedBoard Plus - ATmega328P microcontroller with Optiboot (UNO) Bootloader - Qwiic Connect System
+2. SparkFun Qwiic Quad Relay
+3. SparkFun 20x4 SerLCD - RGB Backlight (Qwiic) - Black on Red/Green/Blue Display Communicate with Serial I2C
+4. SparkFun Qwiic Quad Solid State Relay Kit (discontinued by Sparkfun)
+5. Adafruit DS3231 Precision RTC Breakout
+6. BOJACK TMP36 Temperature Sensors 3 Pin TMP36GZ High Precision Celsius Temperature Sensor (beware of counterfeit sensors from other vendors!)
+7. Four sample keys from Adafruit
+8. Gikfun Screw Shield Expansion Board for Arduino UNO R3 EK7007
+9. 12 Positions 600V 15A Dual Row Screw Terminals Strip + 16Pcs Pre-Insulated Barrier Strips
+10. Three electrolytic capacitors (to de-noise the temperature sensors)
+11. MAKERELE Outdoor Junction Box ABS Plastic Waterproof Universal Electrical Project Box Grey Enclosure with Transparent Cover 
+
+Modifications to the spa:
+
+1. U.S. Solid Motorized Ball Valve- 1/2" Stainless Steel Electrical Ball Valve with Full Port, 9-24V DC and 5 Wire Setup
+2. DPDT Signal Relay Module, 12Vdc, RY12W-K Relay (zip-tied inside of the spa's controller, to allow the solar-thermal controller to enable and disable the spa's electric heater
+3. 1/2" PEX-A tubing
+4. Stainless steel hose clamps ([Hose Clamp- Qibaok 120 PCS Stainless Steel Hose Clamps Assortment Kit 1/4''–1-1/2'' Worm Gear Clamps for Fuel Line, Plumbing, Automotive, Mechanical Applications, Pipe, Tube, Radiator, Garden](https://www.amazon.com/dp/B0C24M2PJJ?ref_=ppx_hzsearch_conn_dt_b_fed_asin_title_1)
+5. 1" vinyl tubing (from ACE Hardware)
+
+Spa heat exchanger, tank materials, and plumbing to the spa:
+
+1. Vigorous Stainless Steel Tubing Coil, 1/2" x 25Ft 304 Stainless Steel Tubing
+2. EFIELD Poly PPSU Pex-A Expansion Fitting 1 Inch x 1 Inch 90 Degree Elbow For Pex A Tubing/Pipe Only, ASTM F1960
+3. XFITTING 1/2" Pex A x 1/2" Male Elbow, F1960 Expansion MNPT Elbow
+4. Pipe insulate 1/2" ID
+5. Vega Bond V600 Closed Cell Spray Foam Insulation Kit. 2 Part Foam Sealant 600BF,White
+6. MAX BOND THIXOTROPIC from POLYMER COMPOSITES, INC
+7. Structural epoxy from POLYMER COMPOSITES, INC
+
+## Resources
+
+0. Chemists at Polymer Composite Inc were incredibly helpful
+1. Amazon for ordering most components
+2. Local hardware store for some plumbing fittings, supplies, and tools
+3. ChatGPT to help me debug problems, explain APIs, write code.  This makes embedded development much more efficient and fun, but it isn't perfect, so beware of it giving super detailed advice that seems amazing .. but can lead to some wasted hours.
+4. Arduino support to report problems with the Arduino IDE on my M3 Mac mini (they were super helpful)
+
+## Pin assignments
+
+Grey CAT5:
+
+* Call for heat +12V/Ground from spa is in blue CAT5 and the blue and blue/white pair
+* Spa heat enable +12V/Ground to spa is in blue CAT5 and the orange and orange/white pair
+* There are two spare wire pairs
+
+Blue CAT5:
+* +5VDC/ground for LM35 from controller is in the grey CAT5 and the brown and brown/white pair
+* Spa LM35 signal to the controller is in the grey CAT5 and the orange/white wire
+* Spa valve motor wires blue/yellow wires connects to the grey CAT5 and the blue and blue/white pair
+* Spa valve position status common wire is black and connects to the grey CAT5 green/white wire
+* Spa valve position "open" status wire is green and connects to the grey CAT5 green wire
+* Spa valve position "closed" status wire is red and connects to the grey CAT5 orange wire
+
+## Problems
+
+The Sparkfun 4-relay board proved to have an unreliable 5VDC power supply.  I went through several of these before giving up and installing an external 12V-to-5VDC buck converter to generate reliable 5VDC for this relay board and other things. I do not believe I was abusing the relay board's power supply or anything else about it.  
+
+The Sparkfun 4-SSR board, now discontinued, was also unreliable.  I wound up just using it for its SSRs and its ability to hold them mechanically.  The controller powers the SSR low voltage control inputs directly from discrete Arduino outputs.
+
+The first US Solid valve I got over-rotated when closing, with the result being slightly open when it was supposed to be closed.  I was unable to adjust the stop-points and the vendor sent me a replacement valve, which is working well so far.
+
+When I added the last I2C device, the RTC, I2C devices that had been working at 400 kbps, would only work at 100 kbps.  I found that all the pull-ups together brought the pull-up resistance on the SDA and SCL lines to about 1.2 kilo-ohms, which was too low for the I2C drivers in all the devices.  I used diagonal cutters to cut out the 4.7 k-ohm resistors on the SerLCD device and that cured the problem.
+
+The first time I glued a PVC T fitting into the 1" vinyl tube that carries water from the spa recirculating pump to the spa's electric heater, it leaked.  When I redid it, I used a different cement, I zip-tied a 1/2" PVC pipe to both sides of the fitting to reduce flexing loads on the new fitting, I let it cure for a day, and I added a second sealant for good measure.  
+
+I tried various methods to clean the tank.  I wish that I had gotten a good mask to avoid inhaling particulates from the start.  I used angle grinders with grinding disks, but better was using a wire brush head on the angle grinder.  I tried sand blasting, but that was ineffective.  If I had had a commercial high volume sand blaster, it probably would have worked well, but that was far beyond what I had access to.  The grinding and polishing of the old tank took a long time and was difficult work.
+
+If I had to do it again, I would not have tried to weld in replacement sections.  In the end, the epoxy worked well and there were far too many leaks to fix via welding.  And even if I could have welded all the leaks shut, the tank still needed a coat of epoxy to stop future leaks as the metal had been permanently damaged from over heating when the tank was built.
+
+The first epoxy I used was HTE (high temperature epoxy), but this was not a good choice.  Any of the epoxies would be able to take the 170F maximum water temperature.  I applied a number of coats of epoxy with sanding, polishing, and cleaning between coats.
+
+I ordered LM35 temperature sensors from Bridgold and they were counterfeit.  I should have checked their customer happiness, half of their customers reported the same thing.
+
+The OS upgrade of my Arudino host, an Intel-based Mac mini, bricked it.  I spent a lot of time trying to recover it.  I switched to buying a new M3 Mac mini and it took a long time to get the Arduino tools to run correctly on it.  The key step was that I needed to have Rosetta-2 installed and that is no longer installed by default.  ChatGPT had me trying a lot of exotic and tricky fixes that didn't work and never mentioned Rosetta-2.  However, when I filed a bug with Arduino, their auto-reply message suggested this and it fixed the problem immediately.
+
+My initial placement of the return water from the heat exchanger was in the filter box.  However, that meant that the valve would cycle frequently because the hot water quickly got through the filter, to the recirculation pump, and to the spa's temperature sensor.  Cycling frequently could reduce the lifespan of the valve and it means that one hears the valve cycle frequently while enjoying a soak.  I am experimenting with having the return water come out at the bottom of the spa. The spa's own heater returns water at the bottom of the spa.
+
+## Tank Refinishing
+
+![Tank without heat exchangers, before epoxy](https://github.com/user-attachments/assets/b7a09a4e-818c-41c3-a533-83fbdbb54efa)
+
+![Tank after refinishing, before insulation](https://github.com/user-attachments/assets/3649a3bb-68cb-46c1-bffb-9e1ace458295)
+
+This shows the Takagi water heater, the vertical pipes taking the thermal mass water to and from the roof panels, and the domestic hot water heat exchanger partially connected.  The three ball valves to the left of the Takagi are in "bypass" mode, so that my home had hot water during this project.  Underneath the Takagi is a mixing valve that can optionally mix cold water in case the thermal mass is so hot that it would other present a scalding risk.
+
+![Tank with water lines to roof panels connected](https://github.com/user-attachments/assets/36a97e13-1cae-4a5d-9ef2-2f8a84a44f10)
+
+This shows an 18B20 tank temperature sensor (grey patch in the middle of the frame with a wire leading from it), which is part of a sensor network in my home that is not connected to the solar-thermal controller.  Also shown is the domestic hot water input and output to its heat exchanger, the tank fill plumbing that takes water from the input to the heat exchanger, a sight gauge made from 1/2" vinyl tubing, an overflow drain line (1/2" PEX-A), and the solar pump (a red Grundfos multi-speed pump), and a pressure-relief valve.  The pressure-relief valve is only needed if both the heat exchanger ball valves are closed and the tank heats up -- which would be "operator error". However, with this valve, I do not need to worry about someone closing both of these valves at the same time, with water in the lines, etc.  The Grundfos pump, the solar pump, has been in operation for 15 years, as had the corroded copper plumbing leading up to it.  But it works fine.
+
+![Plumbing side of tank](https://github.com/user-attachments/assets/b962f394-b009-48aa-8581-064c36f0c8fd)
+
+
+
+
+
+
