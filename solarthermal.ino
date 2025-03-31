@@ -19,6 +19,7 @@
 
 #include <string.h> //Use the string Library
 #include <ctype.h>
+
 #include <EEPROM.h>
 #include <assert.h>
 #include <RTClib.h>
@@ -128,7 +129,7 @@ void monitor_spa_electric_heat_callback(void);
 enum temps_e {tank_e, left_panel_e, right_panel_e, spa_e, last_temp_e};
 
 struct temperature_s {
-  int temperature_F;
+  float temperature_F;
   bool temperature_valid;
   char input_pin;
   unsigned last_valid_time; // millis() / 1000 of last time temperature was valid
@@ -136,6 +137,8 @@ struct temperature_s {
   int lower_bound_F;
   int upper_bound_F;
 } temps [last_temp_e];
+
+float ema_alpha = 1.0; // Smoothing factor (0 = slow response, 1 = no filtering)
 
 Task read_time_and_sensor_inputs(TASK_SECOND, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
 /*****************************************************************************************************/
@@ -190,7 +193,9 @@ Task update_lcd(900, TASK_FOREVER, &update_lcd_callback, &ts, true);
 // closed, in the process of opening or closing, or in an indeterminate state after we attempted to
 // open or close it.
 
-unsigned long valve_motion_start_time = 0;
+unsigned last_valve_open_second; // millis() / 1000 the last time a valve-open operation started
+
+unsigned long valve_motion_start_time = 0; // millis() when the last valve open or closed operation started
 
 bool valve_timeout = false;         // True if it takes too long to open or close the spa heat exchanger valve
                                     // Reset to false on next (attempted) valve operation 
@@ -212,7 +217,7 @@ Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callba
 
 #define SOLAR_PUMP_DELAY       (300)         // Minimum number of seconds between solar pump on events
 
-int panel_temperature_F;   // Average of leftmost and rightmost panels
+float panel_temperature_F;   // Average of leftmost and rightmost panels
 
 // The panels must be at least this much hotter than the tank to turn on the solar pump
 const unsigned tank_panel_difference_threshold_on_F = 10;
@@ -293,6 +298,16 @@ void fail(const __FlashStringHelper *fail_message)
   abort();
 }
 
+// From ChatGPT3
+long readVcc() 
+{
+  ADMUX = _BV(REFS0) | _BV(MUX3) | _BV(MUX2) | _BV(MUX1);
+  delay(2);  // Wait for Vref to settle
+  ADCSRA |= _BV(ADSC);  // Start conversion
+  while (bit_is_set(ADCSRA, ADSC));
+  uint16_t result = ADC;
+  return 1125300L / result;  // 1.1V * 1023 * 1000
+}
 /*
    This reads all the sensors frequently, does a little filtering of some of them, and deposits the results in global variables above.
 */
@@ -301,14 +316,30 @@ void read_time_and_sensor_inputs_callback(void)
   arduino_time = now();
   unsigned second_now = millis() / 1000;
   // EMA -- exponential moving average filter, courtesy of ChatGPT 4o
-  const float alpha = 0.1; // Smoothing factor (0 = slow response, 1 = no filtering)
+  if (ema_alpha > 0.03) {
+    ema_alpha -= 0.2;
+    if (ema_alpha < 0.03) {
+      ema_alpha = 0.03;
+    }
+  }
 
+  const int samples = 20;
+  
   for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
-    int adc_value = analogRead(t->input_pin);
-    float voltage = (float)adc_value * (5.0 / 1023.0); 
-    float temp_C = (voltage - 0.5) * 100.0;       /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C*/ ;
-    float temp_F = (temp_C * (90.0 / 50.0)) + 32.0 + t->calibration_offset_F;
-    
+    float temp_F = 0.0;
+    int adc_value;
+    float voltage;
+    float temp_C;
+
+    for (int sample = 0 ; sample < samples ; sample++ ) {
+      adc_value = analogRead(t->input_pin);
+      delay(2);          // Give ADC a chance to settle
+      voltage = (float)adc_value * (5.0 / 1023.0); 
+      temp_C = (voltage - 0.5) * 100.0;       /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C*/ ;
+      temp_F += (temp_C * (90.0 / 50.0)) + 32.0 + t->calibration_offset_F;
+    }
+    temp_F /= samples;
+ 
     // If the temperature is valid, then let this sample's voltage be averaged with
     // previous samples.  If not, toss it out.
     if (temp_F >= t->lower_bound_F && temp_F <= t->upper_bound_F) {
@@ -324,7 +355,7 @@ void read_time_and_sensor_inputs_callback(void)
       snprintf(buf,sizeof(buf), "# OOR [%d] adc=%d v=%s C=%s F=%s", t - &temps[0], adc_value, v_str, c_str, f_str);
       Serial.println(buf);
     }
-    t->temperature_F = alpha * temp_F + (1 - alpha) * t->temperature_F;
+    t->temperature_F = ema_alpha * temp_F + (1 - ema_alpha) * t->temperature_F;
 
     if ((second_now - t->last_valid_time) > 600) {
       // If it has been 10 minutes since the last valid sample, then flag this sensor as not valid
@@ -370,6 +401,16 @@ void read_time_and_sensor_inputs_callback(void)
 
   spa_heat_ex_valve_status_open = digitalRead(SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN) == LOW;
   spa_heat_ex_valve_status_closed = digitalRead(SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN) == LOW;
+
+  static long last_vcc = 0;
+  long vcc = readVcc();
+  if (last_vcc != vcc) {
+    if (last_vcc != 0) {
+      char buf[50];
+      snprintf(buf, sizeof(buf), "# vcc=%ld last_vcc=%ld");
+      Serial.println(buf);
+    }
+  }
 }
 
 // Returns a string that desribes the current diag mode.  For some reason, it stopped working to pass
@@ -409,6 +450,7 @@ void open_spa_heat_exchanger_valve(void)
     valve_timeout = false;
     monitor_valve_opening.enable();
     daily_valve_cycles++;
+    last_valve_open_second = millis() / 1000;
   } else {
     valve_error = true;
   }
@@ -597,7 +639,10 @@ void turn_solar_pump_on(void)
 
 void turn_solar_pump_off(void)
 {
-  daily_seconds_of_solar_pump_on_time += millis() / 1000 - solar_pump_on_time;
+  if (solar_pump_on_time > 0) {
+    daily_seconds_of_solar_pump_on_time += millis() / 1000 - solar_pump_on_time;
+    solar_pump_on_time = 0;
+  }
   digitalWrite(SSR_SOLAR_PUMP_PIN, HIGH); // Turn off solar pump
   solar_pump_on = false;
 }
@@ -678,15 +723,13 @@ void turn_spa_heater_relay_on(void)
 
 void turn_spa_heater_relay_off(void)
 {
-  daily_seconds_of_spa_heater_on_time += (millis()/1000) - spa_heater_relay_on_time;
+  daily_seconds_of_spa_heater_on_time += millis()/1000 - spa_heater_relay_on_time;
   quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
   spa_heater_relay_on = false;
 }
 
 // This contains the normal basic operational logic of this controller, comparing temperatures
 // and deciding which pumps to turn on, how to set the spa heat exchanger valve, etc.
-
-static unsigned last_valve_open_second;
 
 void monitor_spa_electric_heat_callback(void)
 {
@@ -707,12 +750,13 @@ void monitor_spa_electric_heat_callback(void)
         }
       } else {
         unsigned second_now = millis() / 1000;
+        unsigned seconds_valve_open = second_now - last_valve_open_second;
         // If the tank is too cool or if the spa valve has been open for more than 30 minutes, turn on the spa's electric heater
         if (temps[tank_e].temperature_F <= (spa_heat_ex_valve_status_closed ? 113 : 110) ||
-           (spa_heat_ex_valve_status_open && (last_valve_open_second - second_now) > 1800)) {
+           (spa_heat_ex_valve_status_open && (seconds_valve_open > 1800))) {
             char buf[50];
             snprintf(buf, sizeof(buf), "# spaH=%d valve_open=%d valve_closed=%d time=%u",
-              spa_heater_relay_on, spa_heat_ex_valve_status_open, spa_heat_ex_valve_status_closed, last_valve_open_second - second_now);
+              spa_heater_relay_on, spa_heat_ex_valve_status_open, spa_heat_ex_valve_status_closed, seconds_valve_open);
             Serial.println(buf);
           turn_spa_heater_relay_on();
         }
@@ -726,8 +770,7 @@ void monitor_spa_electric_heat_callback(void)
 }
 
 void monitor_spa_valve_callback(void)
-{
-  
+{ 
   if (temps[tank_e].temperature_valid) {
     if (operating_mode == m_oper) {
 
@@ -742,7 +785,6 @@ void monitor_spa_valve_callback(void)
             temps[tank_e].temperature_F >= 113 &&
             spa_heat_ex_valve_status_closed) {
           open_spa_heat_exchanger_valve();
-          last_valve_open_second = millis() / 1000;
         }
       } else {
 
@@ -769,8 +811,8 @@ void monitor_spa_valve_callback(void)
 //  Sends relevant telemetry back over the USB-serial link.
 void print_status_to_serial_callback(void)
 {
-  char data_buf[70];
-  static char last_data_buf[70];
+  char data_buf[88];
+  static char last_data_buf[88];
   static char line_counter = 0;
   static int duplicate_line_counter = 0;
   static bool daily_stats_reset = false;
@@ -820,7 +862,7 @@ void print_status_to_serial_callback(void)
         daily_stats_reset = false;
       }
     }
-    Serial.println(F("# Date     Time Year Mode Tank LPanl RPanl SpaT  SpaH Spump Rpump Taka Call Open Clsd Time Erro"));
+    Serial.println(F("# Date     Time Year Mode Tank LPanl RPanl SpaT  SpaH Spump Rpump Taka Call Open Clsd Time Erro Alpha"));
   
     line_counter = 30;
   }
@@ -832,12 +874,12 @@ void print_status_to_serial_callback(void)
   // # Date     Time Year Mode Tank Panel SpaT SpaH Spump Rpump Taka Call Open Clsd Time Erro
   // Mar 25 10:23:24 2025 Oper  138  157    99    0     0     0    0    0    0    1    0    0
 
-  snprintf(data_buf, sizeof(data_buf), "%s %4d %4d  %4d %4d  %4d  %4d %4d %4d %4d %4d %4d %4d",     
+  snprintf(data_buf, sizeof(data_buf), "%s %4d %4d  %4d %4d  %4d  %4d %4d %4d %4d %4d %4d %4d %4d %4d",     
         operating_mode_to_string(operating_mode),
-        temps[tank_e].temperature_F,
-        temps[left_panel_e].temperature_F,
-        temps[right_panel_e].temperature_F,
-        temps[spa_e].temperature_F,
+        (int)temps[tank_e].temperature_F,
+        (int)temps[left_panel_e].temperature_F,
+        (int)temps[right_panel_e].temperature_F,
+        (int)temps[spa_e].temperature_F,
         spa_heater_relay_on,
         solar_pump_on,
         recirc_pump_on,
@@ -846,7 +888,8 @@ void print_status_to_serial_callback(void)
         spa_heat_ex_valve_status_open,
         spa_heat_ex_valve_status_closed,
         valve_timeout,
-        valve_error);
+        valve_error,
+        unsigned(ema_alpha * 100));
   if (strncmp(data_buf, last_data_buf, sizeof(data_buf)) || duplicate_line_counter > 600) {
     strncpy(last_data_buf, data_buf, sizeof(last_data_buf));
     char date_buf[23];
@@ -950,14 +993,14 @@ void update_lcd_callback(void)
     lcd.print(cbuf);
    
     lcd.setCursor(0, 1);
-    snprintf(cbuf, sizeof(cbuf), "T %3d LP %3d RP %3d", temps[tank_e].temperature_F, temps[left_panel_e].temperature_F, temps[right_panel_e].temperature_F);
+    snprintf(cbuf, sizeof(cbuf), "T %3d LP %3d RP %3d", (int)temps[tank_e].temperature_F, (int)temps[left_panel_e].temperature_F, (int)temps[right_panel_e].temperature_F);
     lcd.print(cbuf);
     
     lcd.setCursor(0, 2);
     snprintf(cbuf, sizeof(cbuf), "RPump%c SPump%c Tak%c ", recirc_pump_on ? '+' : '-', solar_pump_on ? '+' : '-', takagi_on ? '+' : '-');
     lcd.print(cbuf);
     
-    snprintf(cbuf, sizeof(cbuf), "S %3d Sele%c Scal%c ", temps[spa_e].temperature_F, spa_heater_relay_on ? '+' : '-', spa_calling_for_heat ? '+' : '-');
+    snprintf(cbuf, sizeof(cbuf), "S %3d Sele%c Scal%c ", (int)temps[spa_e].temperature_F, spa_heater_relay_on ? '+' : '-', spa_calling_for_heat ? '+' : '-');
     lcd.setCursor(0,3);
     lcd.print(cbuf);
   }
@@ -1010,7 +1053,10 @@ void turn_takagi_on(void)
 
 void turn_takagi_off(void)
 {
-  daily_seconds_of_takagi_on_time += millis() / 1000 - takagi_on_time;
+  if (takagi_on_time > 0) {
+    daily_seconds_of_takagi_on_time += millis() / 1000 - takagi_on_time;
+    takagi_on_time = 0;
+  }
   digitalWrite(SSR_TAKAGI_PIN, HIGH); // Turn off Takagi flash heater
   takagi_on = false;
 }
@@ -1103,7 +1149,7 @@ void setup_arduino_pins(void)
 void setup_temperature_sensors()
 {
   temps[tank_e].input_pin = A0;            // Measures the voltage from the LM35 glued to the tank
-  temps[tank_e].calibration_offset_F = 14; // Calibrated by comparing with the 18B20 that has been on the tank for years
+  temps[tank_e].calibration_offset_F = 15; // Calibrated by comparing with the 18B20 that has been on the tank for years
   temps[tank_e].lower_bound_F = 40;
   temps[tank_e].upper_bound_F = 190;
 
@@ -1113,23 +1159,34 @@ void setup_temperature_sensors()
   temps[left_panel_e].upper_bound_F = 280;
 
   temps[spa_e].input_pin = A2;         // Temperature of metal tube in spa after recirc pump
-  temps[spa_e].calibration_offset_F = 13;
+  temps[spa_e].calibration_offset_F = 11;
   temps[spa_e].lower_bound_F = 32;
   temps[spa_e].upper_bound_F = 120;
 
   temps[right_panel_e].input_pin = A3;    // Rightmost solar panel temperature
-  temps[right_panel_e].calibration_offset_F = 6; 
+  temps[right_panel_e].calibration_offset_F = 2; 
   temps[right_panel_e].lower_bound_F = 10;
   temps[right_panel_e].upper_bound_F = 280;
 
   // Give approximate initial values to the temperature readings so that at start up, we don't
-  // have values that are way off (we don't want to wait until the EMA catches up)
-  for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
-    int adc_value = analogRead(t->input_pin);
-    float voltage = (float)adc_value * (5.0 / 1023.0);
-    float temp_C = (voltage - 0.5) * 100.0; /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C */
-    t->temperature_F = temp_C * (90.0 / 50.0) + 32.0 + t->calibration_offset_F;
-    t->temperature_valid = t->temperature_F >= t->lower_bound_F && t->temperature_F <= t->upper_bound_F;
+  // have values that are way off (we don't want to wait until the EMA catches up).  Run this
+  // many times and take the last reading.
+  const bool need_for_seed = true;
+  if (need_for_seed) {
+    const int seed_samples = 50;
+    for (int i = 0 ; i < seed_samples ; i++ ) {
+      for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
+        int adc_value = analogRead(t->input_pin);
+        delay(2);   // Let ADC settle
+        float voltage = (float)adc_value * (5.0 / 1023.0);
+        float temp_C = (voltage - 0.5) * 100.0; /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C */
+        t->temperature_F += temp_C * (90.0 / 50.0) + 32.0 + t->calibration_offset_F;
+      }
+    }
+    for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
+      t->temperature_F /= seed_samples;
+      t->temperature_valid = t->temperature_F >= t->lower_bound_F && t->temperature_F <= t->upper_bound_F;
+    }
   }
 }
 void setup_lcd(void)
@@ -1357,6 +1414,14 @@ void setup(void)
     Serial.print(F("PCMSK2="));
     Serial.println(PCMSK2);
   }
+
+  // Give these correct values as the tasks may execute in an order in which these are checked
+  // before set.
+  spa_heat_ex_valve_status_open = digitalRead(SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN) == LOW;
+  if (spa_heat_ex_valve_status_open) {
+    last_valve_open_second = millis() / 1000;
+  }
+  spa_heat_ex_valve_status_closed = digitalRead(SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN) == LOW;
 }
 
 /*
