@@ -20,12 +20,11 @@ with open(app_token_path, "r") as f:
 with open(user_token_path, "r") as f:
     user_token = f.read().strip()
 
-SCP_INTERVAL = 1800 # Seconds
-SCP_COMMAND = [
-    "/usr/bin/env", "scp",
+SSH_COMMAND = [
+    "/usr/bin/env", "ssh",
     "-i", "/Users/robertbedichek/.ssh/id_rsa",
-    "/Users/robertbedichek/log/solarthermal.txt",
-    "root@bedichek.org:/var/www/home"
+    "root@bedichek.org",
+    "cat >> /var/www/home/solarthermal.txt"
 ]
 
 port = "/dev/tty.usbserial-11240"   # Replace with your actual port
@@ -38,9 +37,6 @@ ser.setDTR(False)
 time.sleep(1)
 ser.setDTR(True)
 linecount = 0
-
-# We remember the last time we sent the data file to the web server
-last_scp_time = time.time()
 
 def is_valid_data_line(line):
     if line.startswith("#"):
@@ -70,50 +66,38 @@ def is_valid_data_line(line):
 #         if not is_valid_data_line(line):
 #             print(f"Malformed line {i}: {line.strip()}")
 
-
-first_time = True
-
 print(f"Connected to {port}. Reading data...\n")
 
-with open("/Users/robertbedichek/log/solarthermal.txt", "a", buffering=1) as f:
-  try:
-    while True:
+try:
+  while True:
+    try:
+      line = ser.readline().decode('utf-8').strip() 
+    except UnicodeDecodeError:
+      print("⚠️  Corrupted data skipped:", line)
+      line = ""
+    if line and is_valid_data_line(line):
+      linecount = linecount + 1
+      if "alert" in line.lower():
+        data = {
+            "token": app_token,        # This App's Pushover app token
+            "user": user_token,        # My personal user key
+            "message": line 
+        }
+
+        response = requests.post("https://api.pushover.net/1/messages.json", data=data)
+
+        # Optional: log result
+        print(f"Status: {response.status_code}")
+        print(f"Response: {response.text}")
+
+#      print("Running ssh ...")
       try:
-        line = ser.readline().decode('utf-8').strip() 
-      except UnicodeDecodeError:
-        print("⚠️  Corrupted data skipped:", line)
-        line = ""
-      if line and is_valid_data_line(line):
-        f.write(line + "\n")
-        f.flush()
-        linecount += 1
-        if "alert" in line.lower():
-          data = {
-              "token": app_token,        # This App's Pushover app token
-              "user": user_token,        # My personal user key
-              "message": line 
-          }
+        print(line)
+        subprocess.run(SSH_COMMAND, input=(line + "\n").encode("utf-8"), check=True)
+#        print("ssh finished.")
+      except subprocess.CalledProcessError as e:
+        print(f"ssh error: {e}")
 
-          response = requests.post("https://api.pushover.net/1/messages.json", data=data)
-
-          # Optional: log result
-          print(f"Status: {response.status_code}")
-          print(f"Response: {response.text}")
-
-# Check if an hour has passed
-        current_time = time.time()
-        if first_time or (current_time - last_scp_time >= SCP_INTERVAL):
-          first_time = False
-
-          print("Running scp ...")
-          try:
-            subprocess.run(SCP_COMMAND, check=True)
-            print("ssh finished.")
-          except subprocess.CalledProcessError as e:
-            print(f"ssh error: {e}")
-
-          last_scp_time = current_time
-
-  except KeyboardInterrupt:
-    print(f"Stopping after reading and logging {linecount} lines.")
-    ser.close()
+except KeyboardInterrupt:
+  print(f"Stopping after reading and logging {linecount} lines.")
+  ser.close()

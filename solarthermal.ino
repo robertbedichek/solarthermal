@@ -55,6 +55,9 @@ SerLCD *lcd;
 #define SERLCD_I2C_ADDR (0x72)
 const bool fast_lcd_comm = false;
 
+// This string variable is used by multiple functions below, but not at the same time
+char cbuf[77];
+
 #define _TASK_SLEEP_ON_IDLE_RUN
 #include <TaskScheduler.h>
 
@@ -338,15 +341,14 @@ void read_time_and_sensor_inputs_callback(void)
     if (temp_F >= t->lower_bound_F && temp_F <= t->upper_bound_F) {
       t->last_valid_time = second_now;
     } else {
-      char buf[50];
       char v_str[10], c_str[10], f_str[10];
 
       dtostrf(voltage, 4, 3, v_str);
       dtostrf(temp_C, 4, 1, c_str);
       dtostrf(temp_F, 4, 1, f_str);
 
-      snprintf(buf,sizeof(buf), "# OOR [%d] adc=%d v=%s C=%s F=%s", t - &temps[0], adc_value, v_str, c_str, f_str);
-      Serial.println(buf);
+      snprintf(cbuf,sizeof(cbuf), "# OOR [%d] adc=%d v=%s C=%s F=%s", t - &temps[0], adc_value, v_str, c_str, f_str);
+      Serial.println(cbuf);
     }
     t->temperature_F = ema_alpha * temp_F + (1 - ema_alpha) * t->temperature_F;
 
@@ -397,9 +399,8 @@ void read_time_and_sensor_inputs_callback(void)
   long vcc = readVcc();
   if (last_vcc != vcc) {
     if (last_vcc != 0) {
-      char buf[50];
-      snprintf(buf, sizeof(buf), "# vcc=%ld last_vcc=%ld");
-      Serial.println(buf);
+      snprintf(cbuf, sizeof(cbuf), "# vcc=%ld last_vcc=%ld");
+      Serial.println(cbuf);
     }
   }
 }
@@ -775,10 +776,9 @@ void monitor_spa_electric_heat_callback(void)
         unsigned seconds_limit = (1 <= h && h <= 6) ? 3600 : 1800;
         if (temps[tank_e].temperature_F <= (spa_heat_ex_valve_status_closed ? 113 : 110) ||
            (spa_heat_ex_valve_status_open && (seconds_valve_open > seconds_limit))) {
-            char buf[50];
-            snprintf(buf, sizeof(buf), "# spaH=%d valve_open=%d valve_closed=%d time=%u",
+            snprintf(cbuf, sizeof(cbuf), "# spaH=%d valve_open=%d valve_closed=%d time=%u",
               spa_heater_relay_on, spa_heat_ex_valve_status_open, spa_heat_ex_valve_status_closed, seconds_valve_open);
-            Serial.println(buf);
+            Serial.println(cbuf);
           turn_spa_heater_relay_on();
         }
       }
@@ -828,74 +828,115 @@ void monitor_spa_valve_callback(void)
   }
 }
 
+// Called every second to emit a line of telemetry if values of sensors change enough of if
+// any key booleans change.
+
+void print_periodic_header_and_summary_data(void)
+{
+  static bool daily_stats_reset = false;
+
+  snprintf(cbuf, sizeof(cbuf), "# %s %d %02d:%02d:%02d %4d ", 
+      monthShortStr(month(arduino_time)), 
+      day(arduino_time), 
+      hour(arduino_time),
+      minute(arduino_time), 
+      second(arduino_time), 
+      year(arduino_time));
+  Serial.print(cbuf);
+  unsigned sp_on = 0;
+  if (solar_pump_on) {
+    sp_on = millis() / 1000 - solar_pump_on_time;
+  }
+  unsigned eh_on = 0;
+  if (spa_heater_relay_on) {
+    eh_on = millis() / 1000 - spa_heater_relay_on_time;
+  }
+  unsigned t_on = 0;
+  if (takagi_on) {
+    t_on = millis() / 1000 - takagi_on_time;
+  }
+
+  snprintf(cbuf, sizeof(cbuf), "solarthermal %u %u %u %u ",
+    daily_valve_cycles, 
+    daily_seconds_of_solar_pump_on_time + sp_on,
+    daily_seconds_of_spa_heater_on_time + eh_on, 
+    daily_seconds_of_takagi_on_time + t_on);
+  
+  Serial.print(cbuf);
+  Serial.println(F("built: " __DATE__ " " __TIME__));
+
+  if (hour(arduino_time) == 0) {
+    if (!daily_stats_reset) {
+      daily_valve_cycles = 0;
+      daily_seconds_of_solar_pump_on_time = 0;
+      daily_seconds_of_spa_heater_on_time = 0;
+      daily_seconds_of_takagi_on_time = 0;
+      daily_stats_reset = true;
+    } else {
+      daily_stats_reset = false;
+    }
+  }
+  Serial.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Clsd Time Erro"));
+}
 // Called periodically.  More frequently after starting, then slows.
 //  Sends relevant telemetry back over the USB-serial link.
 void print_status_to_serial_callback(void)
 {
-  char data_buf[77];
-  static char last_data_buf[77];
   static char line_counter = 0;
-  static int duplicate_line_counter = 0;
-  static bool daily_stats_reset = false;
-  int h = hour(arduino_time);
-  int m = minute(arduino_time);
-  char date_buf[25];
-
-  if (line_counter == 0) {
-    snprintf(date_buf, sizeof(date_buf), "# %s %d %02d:%02d:%02d %4d ", 
-        monthShortStr(month(arduino_time)), 
-        day(arduino_time), 
-        h,
-        m, 
-        second(arduino_time), 
-        year(arduino_time));
-
-    unsigned sp_on = 0;
-    if (solar_pump_on) {
-      sp_on = millis() / 1000 - solar_pump_on_time;
-    }
-    unsigned eh_on = 0;
-    if (spa_heater_relay_on) {
-      eh_on = millis() / 1000 - spa_heater_relay_on_time;
-    }
-    unsigned t_on = 0;
-    if (takagi_on) {
-      t_on = millis() / 1000 - takagi_on_time;
-    }
-
-    snprintf(data_buf, sizeof(data_buf), "solarthermal %u %u %u %u ",
-      daily_valve_cycles, 
-      daily_seconds_of_solar_pump_on_time + sp_on,
-      daily_seconds_of_spa_heater_on_time + eh_on, 
-      daily_seconds_of_takagi_on_time + t_on);
-    Serial.print(date_buf);
-    Serial.print(data_buf);
-    Serial.println(F("built: " __DATE__ " " __TIME__));
-
-    if (h == 0) {
-      if (!daily_stats_reset) {
-        daily_valve_cycles = 0;
-        daily_seconds_of_solar_pump_on_time = 0;
-        daily_seconds_of_spa_heater_on_time = 0;
-        daily_seconds_of_takagi_on_time = 0;
-        daily_stats_reset = true;
-      } else {
-        daily_stats_reset = false;
-      }
-    }
-    Serial.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Clsd Time Erro"));
+  static int records_skipped;
   
+  if (line_counter == 0) {
+    print_periodic_header_and_summary_data();
     line_counter = 30;
   }
 
-  // We generate the output line in chunks, to conversve memory.  But it also makes the code easier to
-  // read because we don't have one humongous snprintf().  The size of buf is carefully chosen to be just large enough.
+  static int last_tank_F;
+  static int last_avg_panel_F;
+  static bool last_spa_heat;
+  static bool last_solar_pump;
+  static bool last_recirc;
+  static bool last_spa_call;
+  static bool last_spa_open;
+  static bool last_spa_closed;
+  
+  // Only print a line if the tank's temperature has shifted by more than on degree, the average panel temp by more than 2
+  // or any of the booleans.
 
-  // Sample output
-  // # Date     Time Year Mode Tank Panel SpaT SpaH Spump Rpump Taka Call Open Clsd Time Erro
-  // Mar 25 10:23:24 2025 Oper  138  157    99    0     0     0    0    0    0    1    0    0
+  if (abs(last_tank_F - (int)temps[tank_e].temperature_F) > 1 ||
+      abs(last_avg_panel_F - (int)average_panel_temperature_F) > 2 ||
+      last_spa_heat != spa_heater_relay_on ||
+      last_solar_pump != solar_pump_on ||
+      last_recirc != recirc_pump_on ||
+      last_spa_call != spa_calling_for_heat ||
+      last_spa_open != spa_heat_ex_valve_status_open ||
+      last_spa_closed != spa_heat_ex_valve_status_closed ||
+      records_skipped++ > 600) {
 
-  snprintf(data_buf, sizeof(data_buf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d",     
+    last_tank_F = (int)temps[tank_e].temperature_F;
+    last_avg_panel_F = (int)average_panel_temperature_F;
+    last_spa_heat = spa_heater_relay_on;
+    last_solar_pump = solar_pump_on;
+    last_recirc = recirc_pump_on;
+    last_spa_call = spa_calling_for_heat;
+    last_spa_open = spa_heat_ex_valve_status_open;
+    last_spa_closed = spa_heat_ex_valve_status_closed;
+
+    // We generate the output line in chunks, to conversve memory.  But it also makes the code easier to
+    // read because we don't have one humongous snprintf().  The size of buf is carefully chosen to be just large enough.
+
+    // Sample output
+    // # Date     Time Year Mode Tank Panel SpaT SpaH Spump Rpump Taka Call Open Clsd Time Erro
+    // Mar 25 10:23:24 2025 Oper  138  157    99    0     0     0    0    0    0    1    0    0
+    snprintf(cbuf, sizeof(cbuf), "%4u-%02u-%02u %02u:%02u:%02u ", 
+        year(arduino_time),
+        month(arduino_time), 
+        day(arduino_time), 
+        hour(arduino_time),
+        minute(arduino_time), 
+        second(arduino_time));
+
+    Serial.print(cbuf);
+    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d",     
         (int)temps[tank_e].temperature_F,
         (int)temps[left_panel_e].temperature_F,
         (int)temps[right_panel_e].temperature_F,
@@ -910,24 +951,13 @@ void print_status_to_serial_callback(void)
         spa_heat_ex_valve_status_closed,
         valve_timeout,
         valve_error);
-  if (strncmp(data_buf, last_data_buf, sizeof(data_buf)) || duplicate_line_counter > 600) {
-    strncpy(last_data_buf, data_buf, sizeof(last_data_buf));
-    char date_buf[23];
-    snprintf(date_buf, sizeof(date_buf), "%4u-%02u-%02u %02u:%02u:%02u ", 
-        year(arduino_time),
-        month(arduino_time), 
-        day(arduino_time), 
-        h,
-        m, 
-        second(arduino_time));
 
     
-    Serial.print(date_buf);
-    Serial.println(data_buf);
+    Serial.println(cbuf);
     line_counter--;
-    duplicate_line_counter = 0;
+    records_skipped = 0;
   } else {
-    duplicate_line_counter++;
+    records_skipped++;
   }
 }
 
@@ -936,21 +966,20 @@ void print_status_to_serial_callback(void)
 
 void monitor_serial_console_callback(void)
 {
-  char command_buf[3];
-  command_buf[0] = '\0';
+  cbuf[0] = '\0';
 
   while (Serial.available() > 0) {  // Check if data is available to read
     char received_char = Serial.read();  // Read one character
-    int l = strlen(command_buf);
-    if (l >= sizeof(command_buf) - 1) {
+    int l = strlen(cbuf);
+    if (l >= sizeof(cbuf) - 1) {
       Serial.println(F("# command buffer overflow"));
       break;
     }
     if (received_char == '\n') {
       Serial.print(F("# Recieved: "));
-      Serial.println(command_buf);
+      Serial.println(cbuf);
 
-      switch (command_buf[0]) {
+      switch (cbuf[0]) {
         case 's':
           select_key_pressed = true;
           break;
@@ -965,14 +994,14 @@ void monitor_serial_console_callback(void)
 
         default:
           Serial.print(F("# Unknown command: "));
-          Serial.println(command_buf);
+          Serial.println(cbuf);
           Serial.println(F("# choices are: 's', +, -"));
           break;
       }
       break;
     } else {
-      command_buf[l] = received_char;
-      command_buf[l+1] = '\0';
+      cbuf[l] = received_char;
+      cbuf[l+1] = '\0';
     }
   }
 }
@@ -992,7 +1021,6 @@ void print_2_digits_to_lcd(int number)
 void update_lcd_callback(void)
 {
   if (lcd != 0) {
-    char cbuf[21];
     char valve_cbuf[5];
     unsigned seconds_now = millis() / 1000;
     
@@ -1135,14 +1163,13 @@ void monitor_clock_callback(void)
    rtc_h != arduino_h || rtc_m != arduino_m || rtc_s != arduino_s) {
     
     if (verbose_rtc) {
-      char buf[40];
-      snprintf(buf, sizeof(buf), "# RTC: %s %d %02d:%02d:%02d %4d", 
+      snprintf(cbuf, sizeof(cbuf), "# RTC: %s %d %02d:%02d:%02d %4d", 
             monthShortStr(rtc_mo), rtc_d, rtc_h, rtc_m, rtc_s, rtc_y);  
-      Serial.println(buf);
+      Serial.println(cbuf);
 
-      snprintf(buf, sizeof(buf), "# Arduino Clock: %s %d %02d:%02d:%02d %4d", 
+      snprintf(cbuf, sizeof(cbuf), "# Arduino Clock: %s %d %02d:%02d:%02d %4d", 
             monthShortStr(arduino_mo), arduino_d, arduino_h, arduino_m, arduino_s, arduino_y);  
-      Serial.println(buf);
+      Serial.println(cbuf);
    }
 
     // Set Arduino time to RTC time
@@ -1389,11 +1416,10 @@ void setup_rtc(void)
     setTime(h, m, s, d, mo, y);
 
     if (verbose_rtc) {
-      char buf[41];
       Serial.print(F("# Set time from RTC: "));
-      snprintf(buf, sizeof(buf), "%s %d %02d:%02d:%02d %4d", 
+      snprintf(cbuf, sizeof(cbuf), "%s %d %02d:%02d:%02d %4d", 
         monthShortStr(mo), d, h, m, s, y);
-      Serial.println(buf);
+      Serial.println(cbuf);
     }
   }
 }
