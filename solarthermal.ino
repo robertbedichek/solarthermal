@@ -1077,7 +1077,7 @@ void print_status_to_serial_callback(void)
       last_spa_call != spa_calling_for_heat() ||
       last_spa_open != spa_heat_ex_valve_status_open() ||
       last_spa_closed != spa_heat_ex_valve_status_closed() ||
-      records_skipped++ > 300) {
+      records_skipped++ > 600) {
 
     last_tank_F = (int)temps[tank_e].temperature_F;
     last_avg_panel_F = (int)average_panel_temperature_F;
@@ -1103,7 +1103,7 @@ void print_status_to_serial_callback(void)
         second(arduino_time));
 
     Serial.print(cbuf);
-    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %d",     
+    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d",     
         (int)temps[tank_e].temperature_F,
         (int)temps[left_panel_e].temperature_F,
         (int)temps[right_panel_e].temperature_F,
@@ -1117,15 +1117,11 @@ void print_status_to_serial_callback(void)
         spa_heat_ex_valve_status_open(),
         spa_heat_ex_valve_status_closed(),
         valve_timeout,
-        valve_error,
-        lowest_memory);
-
+        valve_error);
     
     Serial.println(cbuf);
     line_counter--;
     records_skipped = 0;
-  } else {
-    records_skipped++;
   }
 }
 
@@ -1244,15 +1240,11 @@ bool recirc_pump_on(void)
 void turn_recirc_pump_on(void) 
 {
   digitalWrite(SSR_RECIRC_PUMP_PIN, LOW); // Ground the low side of the SSR, turning on recirculation pump
-  Serial.print(F("# recirc pump="));
-  Serial.println(recirc_pump_on());
 }
 
 void turn_recirc_pump_off(void) 
 {
   digitalWrite(SSR_RECIRC_PUMP_PIN, HIGH); // Un-Ground the low side of the SSR, turning off recirculation pump
-  Serial.print(F("# recirc pump="));
-  Serial.println(recirc_pump_on());
 }
 
 // This controls the recirculation pump SSR and is currently simple, it just runs for one minute every 30 minutes
