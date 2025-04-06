@@ -43,8 +43,9 @@ def is_valid_data_line(line):
         return True  # Comment line is always OK
 
     parts = line.strip().split()
-    if len(parts) != 16:
-        return False  # Must have exactly 16 fields
+    if len(parts) < 16:
+        print("must have at least 16 fields: ", line, " but has only ", len(parts))
+        return False  # Must have at least 16 fields
 
     try:
         # Try to parse the timestamp fields
@@ -58,6 +59,7 @@ def is_valid_data_line(line):
 
         return True
     except Exception:
+        print("Unable to parse date/time field: " + line)
         return False
 
 # Read and validate lines
