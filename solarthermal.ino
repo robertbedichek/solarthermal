@@ -227,10 +227,10 @@ Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callba
 float average_panel_temperature_F;   // Average of leftmost and rightmost panels
 
 // The panels must be at least this much hotter than the tank to turn on the solar pump
-const float tank_panel_difference_threshold_on_F = 20;
+const float tank_panel_difference_threshold_on_F = 15;
 
 // When the panels drop to being just this much hotter than the tank, turn off the solar pump
-const float tank_panel_difference_threshold_off_F = -15; // Keep running pump until panels 5F colder than tank
+const float tank_panel_difference_threshold_off_F = -20; // Keep running pump until panels this much colder than tank
 unsigned long solar_pump_on_time;   // Set to millis() / 1000 when pump is turned on
 unsigned daily_seconds_of_solar_pump_on_time; // Number of seconds the solar pump has run today
 
@@ -818,9 +818,9 @@ bool spa_heat_ex_valve_status_closed(void)
 
 void open_spa_heat_exchanger_valve(void)
 {
-  if (monitor_valve_opening.isEnabled() == false && 
-      monitor_valve_closing.isEnabled() == false &&
-      quad_lv_relay != 0) {
+  bool opening =  monitor_valve_opening.isEnabled();
+  bool closing = monitor_valve_closing.isEnabled();
+  if (!opening && !closing && quad_lv_relay != 0) {
     Serial.println(F("# alert opening valve"));
     quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
     quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
@@ -831,7 +831,13 @@ void open_spa_heat_exchanger_valve(void)
     last_valve_open_second = millis() / 1000;
     spa_heat_ex_status_closed = false;
   } else {
-    Serial.println(F("# alert error in open_.."));
+    Serial.print(F("# alert error in open_spa_heat_exchanger_valve() "));
+    if (opening) {
+      Serial.print(F("opening "));
+    }
+    if (closing) {
+      Serial.print(F("closing "));
+    }
     valve_error = true;
   }
 }
@@ -875,18 +881,29 @@ void monitor_valve_opening_callback(void)
 
 void close_spa_heat_exchanger_valve(void)
 {
-  if (monitor_valve_opening.isEnabled() == false && 
-     monitor_valve_closing.isEnabled() == false &&
-     quad_lv_relay != 0) {
+  bool opening = monitor_valve_opening.isEnabled();
+  bool closing = monitor_valve_closing.isEnabled();
+  bool valve_not_in_motion = !opening && !closing;
+  if (valve_not_in_motion && quad_lv_relay != 0) {
     Serial.println(F("# alert closing valve"));
     quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
     quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
     valve_motion_start_time = millis();
     valve_timeout = false;
     monitor_valve_closing.enable();
+    valve_not_in_motion = !monitor_valve_opening.isEnabled() && !monitor_valve_closing.isEnabled();
+    if (valve_not_in_motion == false) {
+      Serial.println(F("# alert valve_not_in_motion is false unexpectly"));
+    }
     spa_heat_ex_status_open = false;
   } else {
-    Serial.println(F("# alert error in close_.."));
+    Serial.print(F("# alert error in close_spa_heat_exchanger_valve() "));
+    if (opening) {
+      Serial.print(F("opening "));
+    }
+    if (closing) {
+      Serial.print(F("closing "));
+    }
     valve_error = true;
   }
 }
@@ -926,16 +943,20 @@ void monitor_valve_closing_callback(void)
   }
 }
 
+// This is called every ten seconds and decides whether to open the valve allowing the spa
+// to be heated with solar, to close the valve, or to leave it alone.
+// The first bit of code handles the unlikely case where the valve status does not
+// show the valve to be fully open or fully closed and it attempts to close it.
+
 void monitor_spa_valve_callback(void)
 { 
   check_free_memory(F("monitor_spa_valve.."));
   // The status from the valve is inconsistent, maybe it got stuck between opening and closing
   // when a reboot happened.  This should be extremely rare.
-
+  bool valve_not_in_motion = (monitor_valve_opening.isEnabled() == false) && (monitor_valve_closing.isEnabled() == false);
   if (operating_mode != m_spa_hex_valve) {
     if (spa_heat_ex_valve_status_open() == false && spa_heat_ex_valve_status_closed() == false &&
-        monitor_valve_opening.isEnabled() == false && 
-        monitor_valve_closing.isEnabled() == false &&
+        valve_not_in_motion &&
         valve_status_failed == false) {
           // Try to rectify the situation by asking for the valve to close.
       Serial.println(F("# alert valve status neither open nor closed, attempting to close"));
@@ -951,42 +972,46 @@ void monitor_spa_valve_callback(void)
   }
 
   if (temps[tank_e].temperature_valid) {
-    if (operating_mode == m_oper) {
 
-      // If the following are true, open the spa valve so that the spa water is warmed from solar
-      // 1. the electric heater is off (which means we intend to heat with solar
-      // 2. the spa is calling for heat
-      // 3. The tank temperature reading is valid and the tank is at 115F or above
-      // 4. the apa valve is closed
+    // If the following are true, open the spa valve so that the spa water is warmed from solar
+    // 1. the spa is calling for heat
+    // 2. The tank temperature reading is valid and the tank is at 113F or above
+    // 3. the spa valve is closed
+    // 4. We are in normal operation mode
+    // It is ok if the electric heater is on too
 
-      if (spa_calling_for_heat()) {
-        if (spa_heater_relay_on() == false && 
-            temps[tank_e].temperature_F >= 113 &&
-            spa_heat_ex_valve_status_open() == false &&
-            monitor_valve_opening.isEnabled() == false && 
-            monitor_valve_closing.isEnabled() == false) {
-          open_spa_heat_exchanger_valve();
-        }
-      } else {
+    if (spa_calling_for_heat()) {
+      if (temps[tank_e].temperature_F >= 113 &&
+          spa_heat_ex_valve_status_open() == false &&
+          valve_not_in_motion && operating_mode == m_oper) {
+        open_spa_heat_exchanger_valve();
+      } else if (spa_heat_ex_valve_status_closed() == false && (temps[tank_e].temperature_F <= 110) &&
+          valve_not_in_motion) {
 
-        // If the following are true, close the heat exchanger valve
-        // 1. spa is not calling for heat, ensure that the spa's heat exchanger valve is closed
-        // 2. the spa valve is open
-        // or
-        // 3. The tank temperature is valid and at or below 110F
-        if (spa_heat_ex_valve_status_closed() == false || (temps[tank_e].temperature_F <= 110) &&
-            monitor_valve_opening.isEnabled() == false && 
-            monitor_valve_closing.isEnabled() == false) {
-          close_spa_heat_exchanger_valve();
-        }
+        // Close the valve if the tank is too cool to be effective at heating the spa even though
+        // the spa is calling for heat.
+        Serial.println(F("# alert closing valve due to low tank temperature"));
+        close_spa_heat_exchanger_valve();
+      }
+    } else {
+
+      // If the following are true, close the heat exchanger valve
+      // 1. spa is not calling for heat
+      // 2. the spa valve is open (or, at least, not closed
+      // 3. the valve is not in motion
+
+      if (spa_heat_ex_valve_status_closed() == false && valve_not_in_motion) {
+        Serial.println(F("# alert closing valve due to no call for heat"));
+        close_spa_heat_exchanger_valve();
       }
     }
   } else {
     // If the tank temperature isn't valid, play it safe by making sure the spa valve is closed.
     // The code that controls the spa's electric heater will turn it on in this case.
     if (spa_heat_ex_valve_status_closed() == false &&
-        monitor_valve_opening.isEnabled() == false && 
-        monitor_valve_closing.isEnabled() == false) {
+        valve_not_in_motion) {
+ 
+      Serial.println(F("# alert closing valve due the tank temperature not being valid"));
       close_spa_heat_exchanger_valve();
     }
   }
