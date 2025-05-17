@@ -228,10 +228,10 @@ Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callba
 float average_panel_temperature_F;   // Average of leftmost and rightmost panels
 
 // The panels must be at least this much hotter than the tank to turn on the solar pump
-const float tank_panel_difference_threshold_on_F = 15;
+const float tank_panel_difference_threshold_on_F = 25;
 
 // When the panels drop to being just this much hotter than the tank, turn off the solar pump
-const float tank_panel_difference_threshold_off_F = -20; // Keep running pump until panels this much colder than tank
+const float tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels this much colder than tank
 unsigned long solar_pump_on_time;   // Set to millis() / 1000 when pump is turned on
 unsigned daily_seconds_of_solar_pump_on_time; // Number of seconds the solar pump has run today
 
@@ -1106,7 +1106,7 @@ void print_status_to_serial_callback(void)
       last_spa_call != spa_calling_for_heat() ||
       last_spa_open != spa_heat_ex_valve_status_open() ||
       last_spa_closed != spa_heat_ex_valve_status_closed() ||
-      records_skipped++ > 600) {
+      records_skipped++ > 1200) {
 
     last_tank_F = (int)temps[tank_e].temperature_F;
     last_avg_panel_F = (int)average_panel_temperature_F;
