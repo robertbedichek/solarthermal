@@ -1,17 +1,19 @@
 
 /*
    This controls:
-      An SSR that controls a 120VAC water pump that moves water from the tank to the panels (and back)
-      An SSR that controls the 120VAC water pump that recirculates hot water through our home
+      An SSR that controls a 120VAC water pump that moves water from the tank to the panels (and back) -- the Solar Pump
+      An SSR that controls the 120VAC water pump that recirculates hot water through our home - The Recirc Pump
       An SSR that controls our taka natural-gas-fired domestic water heater
         The Takagi is fed by water that first goes through a heat exchanger in a 4000 pound thermal mass (water)
       A 12V signal that powers a small 12V relay added to the spa controller that enables the electrical spa heater (the "native" heater for the spa)
 
    This senses:
-      Tank temperature via an LM35
-      Panel temperature via an LM335
-      Spa heat exchanger temperature output via an LM35
+      Tank temperature via an TMP36
+      Panel temperature via a pair of TMP36s, one in the leftmost panel, one in the rightmost.
+      Spa heat exchanger temperature output via an TMP36
       A digital input that signals whether the spa is calling for heat
+      A pair of digital inputs that indicate whether the spa heat exchanger valve is fully open or fully closed
+      
       
    Creative Commons Licence
    Robert Bedichek
@@ -46,9 +48,11 @@ const bool verbose_I2C = false;
  * Relay 4 is unused.
  */
 #include "SparkFun_Qwiic_Relay.h"
-#define LV_RELAY_I2C_ADDR  (0x6D)                 // Default I2C address of the mechanical, low voltage, 4-relay board
+#define LV_RELAY1_I2C_ADDR  (0x6D)                 // Default I2C address of the primary mechanical, low voltage, 4-relay board
+#define LV_RELAY2_I2C_ADDR  (0x6C)                 // I2C address of the 4-relay board that controls the roof valves
 
-Qwiic_Relay *quad_lv_relay;
+Qwiic_Relay *quad_lv_relay1;
+Qwiic_Relay *quad_lv_relay2;
 
 #include <SerLCD.h>
 SerLCD *lcd;
@@ -83,27 +87,35 @@ Scheduler ts;
  * We use three of the four relays, but we drive them directly from Arudino digital outputs.
  * To enable an SSR, we drive its control output to ground.
  */
+#define SSR_TAKAGI_PIN      (13)    // writing '0' turns on the Takagi natural-gas fired water heater, also Arduino LED
 #define SSR_SOLAR_PUMP_PIN  (12)    // writing '0' turns on solar pump
 #define SSR_RECIRC_PUMP_PIN (11)    // writing '0' turns on the recirculation pump
-// We have reused this pin, so it is not availble #define SSR_SPARE       (10)
-#define SSR_TAKAGI_PIN      (9)    // writing '0' turns on the Takagi natural-gas fired water heater
+#define ROOF_VALVE_STATUS_PIN (10)  // When 0, means roof valves are set for taking/sending water to solar tank
 
 /*
- * This relay, when energized, sends 12VDC to the data closet.  There, it causes a DPDT relay to
- * energize, which causes the roof valves to switch to taking water from and returning water to the
- * pool.
+ * This relay, when energized, sends 12VDC to the data closet where it is spliced to another wire pair that goes
+ * to the pool pump control.  This signal, when asserted requests that the pool controller send water to the roof
+ * valves.
  */
-#define LV_RELAY_POOL_HEAT_REQUEST  (1)
+#define LV_RELAY2_POOL_HEAT_REQUEST  (1)
+
+/*
+ * This pair of relays energize with 12VDC the four wires that go to the roof valves.  When one pair is energized,
+ * the valves move to the position to take water from and return water to the thermal mass.  When the other pair
+ * is energized, the valves move to the position to take water from the pool and return it to the pool
+ */
+#define LV_RELAY2_ROOF_VALVE_THERMAL_MASS    (2)
+#define LV_RELAY2_ROOF_VALVE_POOL            (3)
 /*
  * There is a motorized valve that I added to the spa.  When it is open, some of the water coming from the recirculation pump in the spa
  * will go through the stainless steel heat exchanger that I added to the solar tank.  This valve is controlled by two 12VDC signals.  When
  * the "open" signal is +12V and the "close" signal is ground, the valve will open.  When the "close" signal is +12VDC and the "open" signal
  * is ground, then the valve will close.  These two signals are enabled by relays 3 and 2 in the Sparkfun relay board.  Relay 1 is unused.
  */
-#define LV_RELAY_SPA_HEAT_EX_VALVE_OPEN  (2)   // Turning this relay on will cause the spa heat exchanger valve to open
-#define LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE (3)   // Turning on this relay will cause the spa heat exchanger valve to close
+#define LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN  (2)   // Turning this relay on will cause the spa heat exchanger valve to open
+#define LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE (3)   // Turning on this relay will cause the spa heat exchanger valve to close
 
-#define LV_RELAY_SPA_ELEC_HEAT_ENABLE    (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
+#define LV_RELAY1_SPA_ELEC_HEAT_ENABLE    (4) // Writing '1' enables the spa relay to power the electric water heater when the spa is calling for heat
 
 /// Digital signal that indicates spa is calling for heat
 #define SPA_HEAT_DIGITAL_IN_PIN (8)
@@ -116,7 +128,7 @@ Scheduler ts;
 #define SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN   (10)  // Green wire from the Solid Valve, which goes to Green CAT5. Valve is open when this is a zero
 #define SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN (3)  // Red wire on Solid valve, which goes to Orange CAT5.  Valve is closed when this is zero.
 
-typedef enum {m_oper, m_safe, m_poolheat, m_rpump, m_spump, m_takagi, m_spa_hex_valve, m_spa_elec, m_last} operating_mode_t;
+typedef enum {m_oper, m_safe, m_poolheat, m_roof_valves, m_rpump, m_spump, m_takagi, m_spa_hex_valve, m_spa_elec, m_last} operating_mode_t;
 
 void monitor_valve_closing_callback(void);
 void monitor_valve_opening_callback(void);
@@ -258,7 +270,7 @@ Task monitor_recirc_pump(TASK_SECOND * 10, TASK_FOREVER, &monitor_recirc_pump_ca
 const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
 const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
 
-bool takagi_on();
+bool takagi_on(void);
 
 void turn_takagi_on(void);
 void turn_takagi_off(void);
@@ -463,7 +475,7 @@ void read_time_and_sensor_inputs_callback(void)
 
 const char *operating_mode_to_string(operating_mode_t operating_mode) 
 {
-  char *s[] = {"Oper", "Safe", "Pool", "D-RP", "D-SP", "D-TK", "D-HX", "D-EL"};
+  char *s[] = {"Oper", "Safe", "Pool", "Roof", "D-RP", "D-SP", "D-TK", "D-HX", "D-EL"};
   if (operating_mode < m_last) {
     return s[operating_mode];
   }
@@ -545,6 +557,12 @@ void process_pressed_keys_callback(void)
         Serial.println(pool_heat_request_relay_on());
         break;
 
+      case m_roof_valves:
+        turn_roof_valve_to_pool_mode();
+        Serial.print(F("# roof valve set to: "));
+        Serial.println(roof_valve_in_tank_mode() ? F("hex mode") : F("pool_mode"));
+        break;
+
       case m_rpump:
         turn_recirc_pump_on();
         Serial.print(F("# recirc pump="));
@@ -591,6 +609,13 @@ void process_pressed_keys_callback(void)
         Serial.print(F("# pool heat request="));
         Serial.println(pool_heat_request_relay_on());
         break;
+
+      case m_roof_valves:
+        turn_roof_valve_to_tank_mode();
+        Serial.print(F("# roof valve set to: "));
+        Serial.println(roof_valve_in_tank_mode() ? F("hex mode") : F("pool_mode"));
+        break;
+
 
       case m_rpump:
         turn_recirc_pump_off();
@@ -682,8 +707,10 @@ void monitor_solar_pump_callback(void)
           if (h <= 9 || h >= 20) {
             record_error(F("wrong time of day for solar pump on"));
           } else {
-            turn_solar_pump_on();
-            last_solar_pump_on_time = millis();
+            if (roof_valve_in_tank_mode()) {
+              turn_solar_pump_on();
+              last_solar_pump_on_time = millis();
+            }
           }
         }
       }
@@ -704,7 +731,7 @@ void monitor_solar_pump_callback(void)
     } else {
       // The panel temperature is valid, but the tank temperature is not.  Just turn on the pump if the panels are above
       // 170F and turn it off at 1700.
-      if (solar_pump_on() == false && average_panel_temperature_F > 170) {
+      if (solar_pump_on() == false && average_panel_temperature_F > 170 && roof_valve_in_tank_mode()) {
         turn_solar_pump_on();
       }
       if (solar_pump_on() && h >= 17) {
@@ -714,7 +741,7 @@ void monitor_solar_pump_callback(void)
   } else {
     // We can't use the panel temperature, so just turn on the solar pump in the late morning and turn it off in the late
     // afternoon
-    if (solar_pump_on() == false && h >= 11) {
+    if (solar_pump_on() == false && h >= 11 && roof_valve_in_tank_mode()) {
       turn_solar_pump_on();
     }
     if (solar_pump_on() && h >= 17) {
@@ -725,43 +752,43 @@ void monitor_solar_pump_callback(void)
 
 bool spa_heater_relay_on(void)
 {
-  return quad_lv_relay->getState(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+  return quad_lv_relay1->getState(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
 }
 
 void turn_spa_heater_relay_on(void)
 {
-  if (quad_lv_relay != 0) {
+  if (quad_lv_relay1 != 0) {
     spa_heater_relay_on_time = millis();
-    quad_lv_relay->turnRelayOn(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+    quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
   }
 }
 
 void turn_spa_heater_relay_off(void)
 {
-  if (quad_lv_relay != 0) {
+  if (quad_lv_relay1 != 0) {
     daily_seconds_of_spa_heater_on_time += (millis() - spa_heater_relay_on_time) / 1000;
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
   }
 }
 
 bool pool_heat_request_relay_on(void)
 {
-  return quad_lv_relay->getState(LV_RELAY_POOL_HEAT_REQUEST);
+  return quad_lv_relay1->getState(LV_RELAY2_POOL_HEAT_REQUEST);
 }
 
 void turn_pool_heat_request_relay_on(void)
 {
-  if (quad_lv_relay != 0) {
+  if (quad_lv_relay1 != 0) {
     pool_heat_request_relay_on_time = millis();
-    quad_lv_relay->turnRelayOn(LV_RELAY_POOL_HEAT_REQUEST);
+    quad_lv_relay1->turnRelayOn(LV_RELAY2_POOL_HEAT_REQUEST);
   }
 }
 
 void turn_pool_heat_request_relay_off(void)
 {
-  if (quad_lv_relay != 0) {
+  if (quad_lv_relay1 != 0) {
     // daily_seconds_of_pool_heat_request_on_time += (millis() - pool_heat_request_relay_on_time) / 1000;
-    quad_lv_relay->turnRelayOff(LV_RELAY_POOL_HEAT_REQUEST);
+    quad_lv_relay1->turnRelayOff(LV_RELAY2_POOL_HEAT_REQUEST);
   }
 }
 
@@ -858,12 +885,12 @@ void open_spa_heat_exchanger_valve(void)
 {
   bool opening =  monitor_valve_opening.isEnabled();
   bool closing = monitor_valve_closing.isEnabled();
-  if (!opening && !closing && quad_lv_relay != 0) {
+  if (!opening && !closing && quad_lv_relay1 != 0) {
     if (valve_verbose) {
       Serial.println(F("# alert opening valve"));
     }
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
-    quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
+    quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
     valve_motion_start_time = millis();
     valve_timeout = false;
     monitor_valve_opening.enable();
@@ -897,8 +924,8 @@ void monitor_valve_opening_callback(void)
     valve_timeout = true;
   }
   if (spa_heat_ex_valve_status_open() || valve_timeout) {
-    if (quad_lv_relay != 0) {
-      quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+    if (quad_lv_relay1 != 0) {
+      quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
     } else {
       // We should never get here, if the relay is gone, we should not have
       // enabled this task.
@@ -923,13 +950,13 @@ void close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
   bool opening = monitor_valve_opening.isEnabled();
   bool closing = monitor_valve_closing.isEnabled();
   bool valve_not_in_motion = !opening && !closing;
-  if (valve_not_in_motion && quad_lv_relay != 0) {
+  if (valve_not_in_motion && quad_lv_relay1 != 0) {
     if (valve_verbose) {
       Serial.print(F("# alert closing valve: "));
       Serial.println(caller);
     }
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
-    quad_lv_relay->turnRelayOn(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
+    quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
     valve_motion_start_time = millis();
     valve_timeout = false;
     monitor_valve_closing.enable();
@@ -967,8 +994,8 @@ void monitor_valve_closing_callback(void)
   }
 
   if (spa_heat_ex_valve_status_closed() || valve_timeout) {
-    if (quad_lv_relay != 0) {
-      quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
+    if (quad_lv_relay1 != 0) {
+      quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
     } else {
       // We should never get here, if the relay is gone, we should not have
       // enabled this task.
@@ -1381,6 +1408,28 @@ bool takagi_on()
   return digitalRead(SSR_TAKAGI_PIN) == LOW;
 }
 
+void turn_roof_valve_to_tank_mode(void)
+{
+  if (quad_lv_relay2 != (void *)0 && roof_valve_in_tank_mode() == false) {
+    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVE_THERMAL_MASS);
+    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVE_POOL);
+  }
+}
+
+void turn_roof_valve_to_pool_mode(void)
+{
+  if (quad_lv_relay2 != (void *)0 && roof_valve_in_tank_mode()) {
+    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVE_THERMAL_MASS);
+    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVE_POOL);
+  }
+}
+
+bool roof_valve_in_tank_mode()
+{
+  return digitalRead(ROOF_VALVE_STATUS_PIN) == LOW;
+}
+
+
 void turn_takagi_on(void)
 {
   takagi_on_time = millis();
@@ -1477,14 +1526,14 @@ void setup_arduino_pins(void)
   pinMode(SSR_RECIRC_PUMP_PIN, OUTPUT);
 
   turn_takagi_off();
-  pinMode(SSR_TAKAGI_PIN, OUTPUT);
+  pinMode(SSR_TAKAGI_PIN, OUTPUT);       // Pin 13, which is also the Arduino LED control.  LED is off when Takagi on, LED on when Takagi is off
   
   pinMode(SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN, INPUT_PULLUP);
   pinMode(SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN, INPUT_PULLUP);
 
   pinMode(SPA_HEAT_DIGITAL_IN_PIN, INPUT_PULLUP);
   
-  pinMode(LED_BUILTIN, OUTPUT); 
+  pinMode(ROOF_VALVE_STATUS_PIN, INPUT_PULLUP); 
 }
 
 void setup_temperature_sensors()
@@ -1599,12 +1648,22 @@ void setup_i2c_bus(void)
            }
            break;
 
-         case LV_RELAY_I2C_ADDR:
+         case LV_RELAY1_I2C_ADDR:
            if (verbose_I2C) {
-             Serial.print(F(" (Quad Qwiic Relay)"));
+             Serial.print(F(" (Quad Qwiic Relay1)"));
            }
-           quad_lv_relay = new Qwiic_Relay(address);
-           if (quad_lv_relay->begin() == 0) {
+           quad_lv_relay1 = new Qwiic_Relay(address);
+           if (quad_lv_relay1->begin() == 0) {
+             Serial.print(F("# Failure to start quad qwiic relay object"));
+           }
+           break;
+
+         case LV_RELAY2_I2C_ADDR:
+           if (verbose_I2C) {
+             Serial.print(F(" (Quad Qwiic Relay2)"));
+           }
+           quad_lv_relay2 = new Qwiic_Relay(address);
+           if (quad_lv_relay2->begin() == 0) {
              Serial.print(F("# Failure to start quad qwiic relay object"));
            }
            break;
@@ -1616,12 +1675,21 @@ void setup_i2c_bus(void)
           break;
           
          default:
-          if (quad_lv_relay == (void *)0) {
+          if (quad_lv_relay1 == (void *)0) {
             Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
-            quad_lv_relay = new Qwiic_Relay(address);
-            if (quad_lv_relay->begin()) {
+            quad_lv_relay1 = new Qwiic_Relay(address);
+            if (quad_lv_relay1->begin()) {
               Serial.print(F("# Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
-              quad_lv_relay->changeAddress(LV_RELAY_I2C_ADDR);
+              quad_lv_relay1->changeAddress(LV_RELAY1_I2C_ADDR);
+            } else {
+              Serial.print(F("# unexpected device, unable to treat it as a quad qwiic relay\n"));
+            }
+          } else if (quad_lv_relay2 == (void *)0) {
+            Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
+            quad_lv_relay2 = new Qwiic_Relay(address);
+            if (quad_lv_relay2->begin()) {
+              Serial.print(F("# Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
+              quad_lv_relay1->changeAddress(LV_RELAY2_I2C_ADDR);
             } else {
               Serial.print(F("# unexpected device, unable to treat it as a quad qwiic relay\n"));
             }
@@ -1646,7 +1714,7 @@ void setup_i2c_bus(void)
       Serial.println(F("# No I2C devices found\n"));
     }
   }
-  if (quad_lv_relay == (void *)0) {
+  if (quad_lv_relay1 == (void *)0 || quad_lv_relay2 == (void *)0) {
     record_error(F("REL LV"));
   }
 }
@@ -1735,16 +1803,16 @@ void setup(void)
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
   Serial.println(F("# alert reboot"));              // Put the first line we print on a fresh line (i.e., left column of output)
   
-  setup_i2c_bus(); // This sets "quad_lv_relay"
+  setup_i2c_bus(); // This sets "quad_lv_relay1"
     
   // Ensure that the motorized valve is unpowered
-  if (quad_lv_relay != 0) {
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_CLOSE);
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_HEAT_EX_VALVE_OPEN);
+  if (quad_lv_relay1 != 0) {
+    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
+    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
 
     // By default, the spa electric heater is unpowered.  If the tank is too
     // cold, it will quickly be turned back on.
-    quad_lv_relay->turnRelayOff(LV_RELAY_SPA_ELEC_HEAT_ENABLE);
+    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
   }
   setup_lcd();
   setup_rtc();
