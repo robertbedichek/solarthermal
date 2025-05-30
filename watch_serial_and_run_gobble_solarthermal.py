@@ -7,7 +7,7 @@ import serial
 import errno
 
 DEVICE = "/dev/tty.usbserial-11240"
-SCRIPT = "/Users/robertbedichek/bin/gobble_thermal.py"
+SCRIPT = os.path.expanduser('~/bin/gobble_solarthermal.py')
 CHECK_INTERVAL = 60  # seconds
 
 
@@ -22,7 +22,7 @@ def is_device_available():
         return False
 
 def start_script():
-    print("Starting gobble_thermal.py...")
+    print("Starting gobble_solarthermal.py...")
     return subprocess.Popen(["python3", "-W", "ignore::UserWarning:urllib3", SCRIPT])
 
 def main():
@@ -37,11 +37,11 @@ def main():
                     proc = start_script()
                 elif proc.poll() is not None:
                     # Process exited — restart it
-                    print("gobble_thermal.py crashed or exited — restarting...")
+                    print("gobble_solarthermal.py crashed or exited — restarting...")
                     proc = start_script()
             else:
                 if proc is not None:
-                    print("Device in use — stopping gobble_thermal.py...")
+                    print("Device in use — stopping gobble_solarthermal.py...")
                     proc.terminate()
                     try:
                         proc.wait(timeout=5)
