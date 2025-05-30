@@ -29,7 +29,7 @@ RTC_DS3231 rtc;
 #define RTC_I2C_ADDR (0x68)
 const bool force_RTC_reload_from_build_time = false;
 const bool verbose_rtc = false; // Adds 70 bytes to RAM demand if true
-const bool verbose_I2C = false;
+const bool verbose_I2C = true;
 /*
  * We have two Sparkfun relay boards and possibly other 1-wire devices
  */
@@ -60,7 +60,7 @@ SerLCD *lcd;
 const bool fast_lcd_comm = false;
 
 // This string variable is used by multiple functions below, but not at the same time
-char cbuf[77];
+char cbuf[70];
 
 #define _TASK_SLEEP_ON_IDLE_RUN
 #include <TaskScheduler.h>
@@ -90,7 +90,7 @@ Scheduler ts;
 #define SSR_TAKAGI_PIN      (13)    // writing '0' turns on the Takagi natural-gas fired water heater, also Arduino LED
 #define SSR_SOLAR_PUMP_PIN  (12)    // writing '0' turns on solar pump
 #define SSR_RECIRC_PUMP_PIN (11)    // writing '0' turns on the recirculation pump
-#define ROOF_VALVE_STATUS_PIN (10)  // When 0, means roof valves are set for taking/sending water to solar tank
+#define ROOF_VALVE_STATUS_PIN (9)  // When 0, means roof valves are set for taking/sending water to solar tank
 
 /*
  * This relay, when energized, sends 12VDC to the data closet where it is spliced to another wire pair that goes
@@ -303,7 +303,7 @@ int free_memory() {
   return (int)&v - (__brkval == 0 ? (int)&__heap_start : (int)__brkval);
 }
 
-#define LOW_MEMORY_LIMIT (200)
+const unsigned low_memory_limit = 200;
 
 
 int lowest_memory = 2000; // This will be overwritten on the first call to "check_free_memory(F("..."));"
@@ -311,7 +311,7 @@ void check_free_memory(const __FlashStringHelper *caller)
 {
   static int trace_initial_calls = 0;
   int fm = free_memory();
-  if (fm < LOW_MEMORY_LIMIT) {
+  if (fm < low_memory_limit) {
     Serial.print(F("# alert low memory: "));
     Serial.println(fm);
   }
@@ -407,13 +407,22 @@ void read_time_and_sensor_inputs_callback(void)
       t->last_valid_time = millis();
     } else {
       char v_str[10], c_str[10], f_str[10];
+      static int oor_counter = 0;
 
-      dtostrf(voltage, 4, 3, v_str);
-      dtostrf(temp_C, 4, 1, c_str);
-      dtostrf(temp_F, 4, 1, f_str);
+      if (oor_counter < 100) {
+        dtostrf(voltage, 4, 3, v_str);
+        dtostrf(temp_C, 4, 1, c_str);
+        dtostrf(temp_F, 4, 1, f_str);
 
-      snprintf(cbuf,sizeof(cbuf), "# OOR [%d] adc=%d v=%s C=%s F=%s", t - &temps[0], adc_value, v_str, c_str, f_str);
-      Serial.println(cbuf);
+        snprintf(cbuf,sizeof(cbuf), "# OOR [%d] adc=%d v=%s C=%s F=%s", t - &temps[0], adc_value, v_str, c_str, f_str);
+        Serial.println(cbuf);
+        oor_counter++;
+      } else {
+        // At the top of the hour, reset the out-of-range counter that limits spew
+        if (minute(arduino_time) == 0) {
+          oor_counter = 0;
+        }
+      }
     }
     t->temperature_F = ema_alpha * temp_F + (1 - ema_alpha) * t->temperature_F;
 
@@ -773,14 +782,14 @@ void turn_spa_heater_relay_off(void)
 
 bool pool_heat_request_relay_on(void)
 {
-  return quad_lv_relay1->getState(LV_RELAY2_POOL_HEAT_REQUEST);
+  return quad_lv_relay2->getState(LV_RELAY2_POOL_HEAT_REQUEST);
 }
 
 void turn_pool_heat_request_relay_on(void)
 {
   if (quad_lv_relay1 != 0) {
     pool_heat_request_relay_on_time = millis();
-    quad_lv_relay1->turnRelayOn(LV_RELAY2_POOL_HEAT_REQUEST);
+    quad_lv_relay2->turnRelayOn(LV_RELAY2_POOL_HEAT_REQUEST);
   }
 }
 
@@ -788,7 +797,7 @@ void turn_pool_heat_request_relay_off(void)
 {
   if (quad_lv_relay1 != 0) {
     // daily_seconds_of_pool_heat_request_on_time += (millis() - pool_heat_request_relay_on_time) / 1000;
-    quad_lv_relay1->turnRelayOff(LV_RELAY2_POOL_HEAT_REQUEST);
+    quad_lv_relay2->turnRelayOff(LV_RELAY2_POOL_HEAT_REQUEST);
   }
 }
 
@@ -1132,7 +1141,7 @@ void print_periodic_header_and_summary_data(void)
       daily_stats_reset = false;
     }
   }
-  Serial.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Clsd Pool Time Erro"));
+  Serial.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Clsd Roof Pool Time Erro"));
 }
 // Called periodically.  More frequently after starting, then slows.
 //  Sends relevant telemetry back over the USB-serial link.
@@ -1155,6 +1164,7 @@ void print_status_to_serial_callback(void)
   static bool last_spa_call;
   static bool last_spa_open;
   static bool last_spa_closed;
+  static bool last_roof_valve_to_pool;
   static bool last_pool_heat;
   
   // Only print a line if the tank's temperature has shifted by more than on degree, the average panel temp by more than 2
@@ -1168,6 +1178,7 @@ void print_status_to_serial_callback(void)
       last_spa_call != spa_calling_for_heat() ||
       last_spa_open != spa_heat_ex_valve_status_open() ||
       last_spa_closed != spa_heat_ex_valve_status_closed() ||
+      last_roof_valve_to_pool != !roof_valve_in_tank_mode() ||
       last_pool_heat != pool_heat_request_relay_on() ||
       records_skipped++ > 1200) {
 
@@ -1179,6 +1190,7 @@ void print_status_to_serial_callback(void)
     last_spa_call = spa_calling_for_heat();
     last_spa_open = spa_heat_ex_valve_status_open();
     last_spa_closed = spa_heat_ex_valve_status_closed();
+    last_roof_valve_to_pool = !roof_valve_in_tank_mode();
     last_pool_heat = pool_heat_request_relay_on();
 
     // We generate the output line in chunks, to conversve memory.  But it also makes the code easier to
@@ -1196,12 +1208,15 @@ void print_status_to_serial_callback(void)
         second(arduino_time));
 
     Serial.print(cbuf);
-    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d",     
+    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d ",     
         (int)temps[tank_e].temperature_F,
         (int)temps[left_panel_e].temperature_F,
         (int)temps[right_panel_e].temperature_F,
         (int)average_panel_temperature_F,
-        (int)temps[spa_e].temperature_F,
+        (int)temps[spa_e].temperature_F);
+    Serial.print(cbuf);
+
+    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d", 
         spa_heater_relay_on(),
         solar_pump_on(),
         recirc_pump_on(),
@@ -1209,6 +1224,7 @@ void print_status_to_serial_callback(void)
         spa_calling_for_heat(),
         spa_heat_ex_valve_status_open(),
         spa_heat_ex_valve_status_closed(),
+        !roof_valve_in_tank_mode(),
         pool_heat_request_relay_on(),
         valve_timeout,
         valve_error);
@@ -1410,18 +1426,18 @@ bool takagi_on()
 
 void turn_roof_valve_to_tank_mode(void)
 {
-  if (quad_lv_relay2 != (void *)0 && roof_valve_in_tank_mode() == false) {
+//  if (quad_lv_relay2 != (void *)0 && roof_valve_in_tank_mode() == false) {
     quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVE_THERMAL_MASS);
     quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVE_POOL);
-  }
+//  }
 }
 
 void turn_roof_valve_to_pool_mode(void)
 {
-  if (quad_lv_relay2 != (void *)0 && roof_valve_in_tank_mode()) {
+//  if (quad_lv_relay2 != (void *)0 && roof_valve_in_tank_mode()) {
     quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVE_THERMAL_MASS);
     quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVE_POOL);
-  }
+//  }
 }
 
 bool roof_valve_in_tank_mode()
@@ -1534,6 +1550,7 @@ void setup_arduino_pins(void)
   pinMode(SPA_HEAT_DIGITAL_IN_PIN, INPUT_PULLUP);
   
   pinMode(ROOF_VALVE_STATUS_PIN, INPUT_PULLUP); 
+  
 }
 
 void setup_temperature_sensors()
@@ -1601,7 +1618,7 @@ void setup_lcd(void)
     }
 
     lcd->begin(Wire, SERLCD_I2C_ADDR);         // Default I2C address of Sparkfun 4x20 SerLCD
-    lcd->setBacklight(255, 255, 255);            // Green and blue backlight while booting
+    lcd->setBacklight(100, 100, 100);            // Green and blue backlight while booting
     lcd->setContrast(5);
     lcd->clear();
     
@@ -1802,7 +1819,9 @@ void setup(void)
   Serial.begin(SERIAL_BAUD);
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
   Serial.println(F("# alert reboot"));              // Put the first line we print on a fresh line (i.e., left column of output)
-  
+  Serial.print(F("# roof valve status pin raw="));
+  Serial.println(digitalRead(ROOF_VALVE_STATUS_PIN));
+
   setup_i2c_bus(); // This sets "quad_lv_relay1"
     
   // Ensure that the motorized valve is unpowered
