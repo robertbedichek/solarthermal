@@ -94,18 +94,59 @@ Scheduler ts;
 
 /*
  * This relay, when energized, sends 12VDC to the data closet where it is spliced to another wire pair that goes
- * to the pool pump control.  This signal, when asserted requests that the pool controller send water to the roof
- * valves.
+ * to the pool pump control.  This signal, when asserted requests that the pool controller send water to the roof.
  */
 #define LV_RELAY2_POOL_HEAT_REQUEST  (1)
 
 /*
- * This pair of relays energize with 12VDC the four wires that go to the roof valves.  When one pair is energized,
- * the valves move to the position to take water from and return water to the thermal mass.  When the other pair
- * is energized, the valves move to the position to take water from the pool and return it to the pool
+ * These three relays energize with 12VDC the four wires that go to the roof valves.  Relays 2 and 3 control the
+ * direction of movement ("to tank" or "to pool").  
+ * Relay 2 connections:
+ *   Common - Ground
+ *   NO - Brown CAT 5 Blue/White, which connects on the roof to the white wire coming from the valve and inside the valve box this
+ *        connects to the motor's red wire
+ *   NC - Brown CAT 5 Orange/White, which connects on the roof to the black wire coming from the valve and inside the valve box this
+ *        connects to the motor's black wire
+ *      
  */
-#define LV_RELAY2_ROOF_VALVE_THERMAL_MASS    (2)
+#define LV_RELAY2_ROOF_VALVE_THERMAL_MASS    (2) 
+
+ /*
+  *Relay 3 connections:
+  *   Common - from the NO terminal of Relay 4, which is either +12VDC or is open
+  *   NO - Brown CAT 5 Blue, which connects on the roof to the blue wire coming from the valve and inside the valve box this
+  *        connects to one side of one of the limit switches
+  *   NC - Brown CAT 5 Orange, which connects on the roof to the red wire coming from the valve and inside the valve box this
+  *        connects to one side of one of the limit switches
+  */
+  
 #define LV_RELAY2_ROOF_VALVE_POOL            (3)
+
+/* 
+ *  Relay 4 connections:
+ *  Common - +12VDC
+ *  NO - the common terminal of relay 3
+ *  NC - not connected
+ */
+
+#define LV_RELAY2_ROOF_VALVE_POWER           (4) // Powering this relay enables the roof valve motors to change the roof valve position
+
+/*
+ * Each of the roof valves has another set of limit switches that are not involved in controlling the valve motors.  We use
+ * these to verify valve position.
+ * Limit switch common: Brown CAT 5 green/white
+ * Limit switch indicating valve is in "tank mode": green
+ * Limit switch indicating valve is in "pool mode": brown
+ * 
+ * When in "tank mode", the green and green/white wires are connected
+ * When in "pool mode", the brown and green/white wires are connected
+ * 
+ * Currently we have the common connected to ground and the green ("tank mode") wire connected to ROOF_VALVE_STATUS_PIN (pin 10).
+ * We use this to display the roof valve position on the serial output and the LCD.  We inhibit running the solar pump if this
+ * input indicates the roof valve is not in "tank mode".  We do not assert the "pool request" signal if the input indicates "tank mode",
+ * except in diagnostics mode.
+ */
+ 
 /*
  * There is a motorized valve that I added to the spa.  When it is open, some of the water coming from the recirculation pump in the spa
  * will go through the stainless steel heat exchanger that I added to the solar tank.  This valve is controlled by two 12VDC signals.  When
@@ -193,7 +234,7 @@ Task poll_keys(25, TASK_FOREVER, &poll_keys_callback, &ts, true);
 #endif
 
 volatile unsigned long lastInterruptTime = 0;
-const int debounce_delay = 100;  // 150ms debounce time
+const int debounce_delay = 120;  // 150ms debounce time
 /*****************************************************************************************************/
 
 Task print_status_to_serial(TASK_SECOND, TASK_FOREVER, &print_status_to_serial_callback, &ts, true);
@@ -560,7 +601,7 @@ void process_pressed_keys_callback(void)
       case m_roof_valves:
         turn_roof_valve_to_pool_mode();
         Serial.print(F("# roof valve set to: "));
-        Serial.println(roof_valve_in_tank_mode() ? F("hex mode") : F("pool_mode"));
+        Serial.println(roof_valve_in_tank_mode() ? F("tank mode") : F("pool mode"));
         break;
 
       case m_rpump:
@@ -587,6 +628,9 @@ void process_pressed_keys_callback(void)
         Serial.print(spa_heat_ex_valve_status_open());
         Serial.print(F(" closed="));
         Serial.println(spa_heat_ex_valve_status_closed());
+        if (spa_calling_for_heat() == false) {
+          Serial.println(F("# WARNING: spa not calling for heat"));
+        }
         break;
 
       case m_spa_elec:
@@ -613,7 +657,7 @@ void process_pressed_keys_callback(void)
       case m_roof_valves:
         turn_roof_valve_to_tank_mode();
         Serial.print(F("# roof valve set to: "));
-        Serial.println(roof_valve_in_tank_mode() ? F("hex mode") : F("pool_mode"));
+        Serial.println(roof_valve_in_tank_mode() ? F("tank mode") : F("pool mode"));
         break;
 
 
@@ -885,7 +929,12 @@ void open_spa_heat_exchanger_valve(void)
 {
   bool opening =  monitor_valve_opening.isEnabled();
   bool closing = monitor_valve_closing.isEnabled();
-  if (!opening && !closing && quad_lv_relay1 != 0) {
+  bool ok_to_move_valve = false;
+  ok_to_move_valve |= operating_mode == m_spa_hex_valve;  // Allow movement in diag mode for this valve
+  ok_to_move_valve |= !opening && !closing;         // Also allow it if we are not opening or closing
+  ok_to_move_valve &= quad_lv_relay1 != 0;          // But disallow it if we have no relay1 board to operate on
+  
+  if (ok_to_move_valve) {
     if (valve_verbose) {
       Serial.println(F("# alert opening valve"));
     }
@@ -905,6 +954,7 @@ void open_spa_heat_exchanger_valve(void)
     if (closing) {
       Serial.print(F("closing "));
     }
+    Serial.println();
     valve_error = true;
   }
 }
@@ -1038,46 +1088,47 @@ void monitor_spa_valve_callback(void)
         valve_status_failed = true;
       }
     }
-  }
+  
 
-  if (temps[tank_e].temperature_valid) {
-
-    // If the following are true, open the spa valve so that the spa water is warmed from solar
-    // 1. the spa is calling for heat
-    // 2. The tank temperature reading is valid and the tank is at 113F or above
-    // 3. the spa valve is closed
-    // 4. We are in normal operation mode
-    // It is ok if the electric heater is on too
-
-    if (spa_calling_for_heat()) {
-      if (temps[tank_e].temperature_F >= 113 &&
-          spa_heat_ex_valve_status_open() == false &&
-          valve_not_in_motion && operating_mode == m_oper) {
-        open_spa_heat_exchanger_valve();
-      } else if (spa_heat_ex_valve_status_closed() == false && (temps[tank_e].temperature_F <= 110) &&
-          valve_not_in_motion) {
-
-        // Close the valve if the tank is too cool to be effective at heating the spa even though
-        // the spa is calling for heat.
-        close_spa_heat_exchanger_valve(F("low tank temperature"));
+    if (temps[tank_e].temperature_valid) {
+  
+      // If the following are true, open the spa valve so that the spa water is warmed from solar
+      // 1. the spa is calling for heat
+      // 2. The tank temperature reading is valid and the tank is at 113F or above
+      // 3. the spa valve is closed
+      // 4. We are in normal operation mode
+      // It is ok if the electric heater is on too
+  
+      if (spa_calling_for_heat()) {
+        if (temps[tank_e].temperature_F >= 113 &&
+            spa_heat_ex_valve_status_open() == false &&
+            valve_not_in_motion && operating_mode == m_oper) {
+          open_spa_heat_exchanger_valve();
+        } else if (spa_heat_ex_valve_status_closed() == false && (temps[tank_e].temperature_F <= 110) &&
+            valve_not_in_motion) {
+  
+          // Close the valve if the tank is too cool to be effective at heating the spa even though
+          // the spa is calling for heat.
+          close_spa_heat_exchanger_valve(F("low tank temperature"));
+        }
+      } else {
+  
+        // If the following are true, close the heat exchanger valve
+        // 1. spa is not calling for heat
+        // 2. the spa valve is open (or, at least, not closed
+        // 3. the valve is not in motion
+  
+        if (spa_heat_ex_valve_status_closed() == false && valve_not_in_motion) {
+          close_spa_heat_exchanger_valve(F("no call for heat"));
+        }
       }
     } else {
-
-      // If the following are true, close the heat exchanger valve
-      // 1. spa is not calling for heat
-      // 2. the spa valve is open (or, at least, not closed
-      // 3. the valve is not in motion
-
-      if (spa_heat_ex_valve_status_closed() == false && valve_not_in_motion) {
-        close_spa_heat_exchanger_valve(F("no call for heat"));
+      // If the tank temperature isn't valid, play it safe by making sure the spa valve is closed.
+      // The code that controls the spa's electric heater will turn it on in this case.
+      if (spa_heat_ex_valve_status_closed() == false &&
+          valve_not_in_motion) {
+        close_spa_heat_exchanger_valve(F("tank temperature not valid"));
       }
-    }
-  } else {
-    // If the tank temperature isn't valid, play it safe by making sure the spa valve is closed.
-    // The code that controls the spa's electric heater will turn it on in this case.
-    if (spa_heat_ex_valve_status_closed() == false &&
-        valve_not_in_motion) {
-      close_spa_heat_exchanger_valve(F("tank temperature not valid"));
     }
   }
   check_free_memory(F("monitor_spa_valve.. exit"));
@@ -1342,12 +1393,18 @@ void update_lcd_callback(void)
     lcd->print(cbuf);
     
     lcd->setCursor(0, 2);
-    snprintf(cbuf, sizeof(cbuf), "RPump%c SPump%c Tak%c ", 
-            recirc_pump_on() ? '+' : '-', solar_pump_on() ? '+' : '-', takagi_on() ? '+' : '-');
+    snprintf(cbuf, sizeof(cbuf), "RP%c SP%c TK%c SE%c SC%c", 
+            recirc_pump_on() ? '+' : '-', 
+            solar_pump_on() ? '+' : '-', 
+            takagi_on() ? '+' : '-', 
+            spa_heater_relay_on() ? '+' : '-', 
+            spa_calling_for_heat() ? '+' : '-');
     lcd->print(cbuf);
     
-    snprintf(cbuf, sizeof(cbuf), "S %3d Sele%c Scal%c ", 
-            (int)temps[spa_e].temperature_F, spa_heater_relay_on() ? '+' : '-', spa_calling_for_heat() ? '+' : '-');
+    snprintf(cbuf, sizeof(cbuf), "S %3d PL%c %s", 
+            (int)temps[spa_e].temperature_F, 
+            pool_heat_request_relay_on() ? '+' : '-',
+            roof_valve_in_tank_mode() ? "Tank" : "Pool");
     lcd->setCursor(0,3);
     lcd->print(cbuf);
   }
