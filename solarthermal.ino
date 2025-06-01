@@ -271,10 +271,11 @@ Task monitor_roof_valves(TASK_SECOND, TASK_FOREVER, &monitor_roof_valves_callbac
 
 bool pool_heating_season(void); // Returns true when today is a day we might heat the pool
 bool pool_heating_time(void);   // Returns true if this time and date are when we might heat the pool
-
+bool pool_heating_inop = false; // Set true if heating the pool doesn't work
+bool sequencing_to_heat_pool = false;
 /*****************************************************************************************************/
 
-#define SOLAR_PUMP_DELAY       (300)         // Minimum number of seconds between solar pump on events
+const unsigned long solar_pump_delay = 300;         // Minimum number of seconds between solar pump on events
 
 float average_panel_temperature_F;   // Average of leftmost and rightmost panels
 
@@ -283,7 +284,7 @@ const float tank_panel_difference_threshold_on_F = 25;
 
 // When the panels drop to being just this much hotter than the tank, turn off the solar pump
 const float tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels this much colder than tank
-unsigned long solar_pump_on_or_off_time;   // Set to millis()  when pump is turned on and off
+unsigned long solar_pump_on_off_time;   // Set to millis()  when pump is turned on and off
 unsigned daily_seconds_of_solar_pump_on_time; // Number of seconds the solar pump has run today
 
 bool solar_pump_on(void);
@@ -717,16 +718,16 @@ bool solar_pump_on()
 
 void turn_solar_pump_on(void)
 {
-  solar_pump_on_or_off_time = millis();
+  solar_pump_on_off_time = millis();
   digitalWrite(SSR_SOLAR_PUMP_PIN, LOW); // Turn on solar pump
 }
 
 void turn_solar_pump_off(void)
 {
   if (solar_pump_on()) {
-    daily_seconds_of_solar_pump_on_time += (millis() - solar_pump_on_or_off_time) / 1000;
+    daily_seconds_of_solar_pump_on_time += (millis() - solar_pump_on_off_time) / 1000;
   }
-  solar_pump_on_or_off_time = millis();
+  solar_pump_on_off_time = millis();
   digitalWrite(SSR_SOLAR_PUMP_PIN, HIGH); // Turn off solar pump;
 }
 
@@ -748,17 +749,37 @@ void monitor_solar_pump_callback(void)
   int h = hour(arduino_time);
 
   if (temps[left_panel_e].temperature_valid || temps[right_panel_e].temperature_valid) {
+    static unsigned spew_counter = 0;
+    // If it has been more than five minutes and the panels are super hot, give an alert
+    if (average_panel_temperature_F > 180) {
+        if ((millis() - solar_pump_on_off_time) > 300 * 1000UL) {
+          if (pool_heat_request_relay_on()) {
+            // Pool controller not sending water to panels, despite our request.
+            // Make the pool controller as not working and switch back to heating 
+            // the termal mass 
+            pool_heating_inop = true;
+            sequencing_to_heat_pool = false;
+            turn_pool_heat_request_relay_off();      
+            turn_roof_valves_to_tank_mode();
+            if (spew_counter < 20) {
+              Serial.println(F("# alert panel overtemp with pool request"));
+              spew_counter++;
+            }
+          }
+        }
+    } else {
+      spew_counter = 0;
+    }
+
     if (temps[tank_e].temperature_valid) {
-      if (solar_pump_on() == false && temps[tank_e].temperature_F < 165 &&
+      if (!solar_pump_on() && temps[tank_e].temperature_F < 165 &&
           average_panel_temperature_F > (temps[tank_e].temperature_F + tank_panel_difference_threshold_on_F)) {
-        static unsigned long last_solar_pump_on_time = 0;
-        if (last_solar_pump_on_time == 0 || ((millis() - last_solar_pump_on_time) > SOLAR_PUMP_DELAY)) {
+        if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
           if (h <= 9 || h >= 20) {
             record_error(F("wrong time of day for solar pump on"));
           } else {
             if (roof_valves_status_in_tank_mode() && pool_heating_time() == false) {
               turn_solar_pump_on();
-              last_solar_pump_on_time = millis();
             }
           }
         }
@@ -776,10 +797,10 @@ void monitor_solar_pump_callback(void)
           turn_solar_pump_off();
           record_error(F("solar pump still on at 8PM"));
         }
-        if (pool_heating_time() && temps[tank_e].temperature_F > 135) {
+        if (pool_heating_time() && !pool_heating_inop && temps[tank_e].temperature_F > 135) {
           // During summer months, turn off the solar pump in the afternoon if the thermal
           // mass is warm enough to last through the night.  This is to allow the pool to be
-          // heated.
+          // heate.  But only do this if we haven't given up on the pool heat.
           turn_solar_pump_off();
         }
       }
@@ -799,7 +820,7 @@ void monitor_solar_pump_callback(void)
   } else {
     // We can't use the panel temperature, so just turn on the solar pump in the late morning and turn it off in the late
     // afternoon
-    if (pool_heating_time() == false && solar_pump_on() == false && h >= 11 && roof_valves_status_in_tank_mode()) {
+    if (!pool_heating_time() && !solar_pump_on() && h >= 11 && roof_valves_status_in_tank_mode()) {
       turn_solar_pump_on();
     }
     if (solar_pump_on() && h >= 17) {
@@ -1132,7 +1153,7 @@ void print_periodic_header_and_summary_data(void)
   Serial.print(cbuf);
   unsigned sp_on = 0;
   if (solar_pump_on()) {
-    sp_on = (millis() - solar_pump_on_or_off_time) / 1000;
+    sp_on = (millis() - solar_pump_on_off_time) / 1000;
   }
   unsigned eh_on = 0;
   if (spa_heater_relay_on()) {
@@ -1459,15 +1480,20 @@ void turn_roof_valves_to_tank_mode(void)
     quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
     quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_POOL);
   }
+  if (roof_valves_set_to_pool_mode()) {
+    record_error(F("turn_roof_valves_to_tank_mode()"));
+  }
 }
 
 void turn_roof_valves_to_pool_mode(void)
 {
   if (quad_lv_relay2 != (void *)0) {
-    
     turn_roof_valves_power_on();
     quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
     quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_POOL);
+  }
+  if (roof_valves_set_to_tank_mode()) {
+    record_error(F("turn_roof_valves_to_pool_mode()"));
   }
 }
 
@@ -1513,6 +1539,11 @@ bool roof_valves_set_to_tank_mode()
   return r1;
 }
 
+bool roof_valves_set_to_pool_mode(void)
+{
+  return !roof_valves_set_to_tank_mode();
+}
+
 const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
 
 
@@ -1521,7 +1552,7 @@ const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
 bool pool_heating_time(void)
 {
   int h = hour(arduino_time);
-  return pool_heating_season() && (h >= 14 && h <= 19) ;
+  return pool_heating_season() && (h >= 14 && h < 19) && !pool_heating_inop;
 }   
 
 // Returns true when today is a day we might heat the pool
@@ -1537,29 +1568,48 @@ void monitor_roof_valves_callback()
     turn_roof_valves_power_off();
   }
 
-  if (solar_pump_on() == false && pool_heat_request_relay_on()) {
-    if ((millis() - roof_valves_motion_start_time) > 20000UL) {
-      if (roof_valves_status_in_tank_mode() == false) {
-        turn_pool_heat_request_relay_on();
-      } else {
-        Serial.println(F("# alert roof valve timeout"));
-        turn_roof_valves_power_off();
+  // If the solar pump is off, this is the time of day and day of year when we are to heat the pool,
+  //  and we are not yet requesting that the pool controller send pool water to the roof, and we
+  // have not given up on heating the pool (i.e., we haven't marked it "INOP"), then
+  // first turn the roof valves to pool mode once the solar pump has been off for two minutes
+  // and then turn the pool-heat-request-relay on at least 20 seconds after we have started
+  // the roof valves in motion.
+
+  if (!solar_pump_on() && !pool_heat_request_relay_on() && pool_heating_time()) {
+    // If we have given the tank water to drain back to the tank, then turn the roof
+    // valves to pool mode.
+    sequencing_to_heat_pool = true;
+    if (roof_valves_set_to_tank_mode()) {
+      if ((millis() - solar_pump_on_off_time) > 120 * 1000UL) {
+        turn_roof_valves_to_pool_mode();
+        Serial.println(F("# turning roof valves to pool"));
       }
     }
-  }
   
-  if (pool_heating_time() && solar_pump_on() == false && pool_heat_request_relay_on() == false) {
-    unsigned long panels_have_drained = (millis() - solar_pump_on_or_off_time) > (120 * 1000UL);
-    
-    if (panels_have_drained && average_panel_temperature_F > 100) {
-      turn_roof_valves_to_pool_mode();
-      turn_pool_heat_request_relay_on();
+   //then make that request to the pool controller if it has been more
+  // than 20 seconds since we started the roof valves in motion
+  
+    if (roof_valves_set_to_pool_mode()) {
+      if ((millis() - roof_valves_motion_start_time) > 20000UL) {
+        if (roof_valves_status_in_tank_mode()) {
+          static unsigned char spew_counter;
+          if (spew_counter < 10) {
+            Serial.println(F("# alert roof valve timeout"));
+            spew_counter++;
+          }
+        } else {
+          turn_pool_heat_request_relay_on();
+          Serial.println(F("# pool-heat request"));
+        }
+      } 
     }
   }
-  // 
+
+   // Turn off pool-heat request if the pool heating has failed or it is not the right time of day.
   if (!pool_heating_time() && pool_heat_request_relay_on()) {
     turn_pool_heat_request_relay_off();
-    Serial.println(F("# turning off pool heat request due to time of time"));
+    sequencing_to_heat_pool = false;
+    Serial.println(F("# pool heat request off: TOD"));
   }
 
   // If the roof valves are set to to pool-heat mode, but we are no longer asking for 
@@ -1567,12 +1617,10 @@ void monitor_roof_valves_callback()
   // it has been two minutes since we de-asserted the pool heat request, assume
   // the panels have drained of pool water and turn the roof valves back to tank mode
 
-  if (roof_valves_status_in_tank_mode() == false &&
-      roof_valves_set_to_tank_mode() && 
-      pool_heat_request_relay_on() == false &&
+  if (roof_valves_set_to_pool_mode() && !sequencing_to_heat_pool &&
       (millis() - pool_heat_request_relay_on_off_time) > (120 * 1000UL)) {
     turn_roof_valves_to_tank_mode();
-    Serial.println(F("# turning roof valves to tank mode after drain-down time"));
+    Serial.println(F("# roof valves to tank mode after drain-down"));
   }
 
   if ((millis() - roof_valves_motion_start_time) > 30000UL) {
@@ -1600,7 +1648,7 @@ void turn_takagi_off(void)
 
 void monitor_takagi_callback(void)
 {
-  check_free_memory(F("monitor_takagi_"));
+  check_free_memory(F("mt_"));
   static unsigned long last_takagi_change = 0;
 
   if (operating_mode == m_oper || operating_mode == m_safe) {
@@ -1623,7 +1671,7 @@ void monitor_takagi_callback(void)
 // Once an hour, read the RTC and set Arduino time based on it.
 void monitor_clock_callback(void)
 {
-  check_free_memory(F("monitor_clock.."));
+  check_free_memory(F("mc"));
   arduino_time = now();
   
   DateTime rtc_now = rtc.now();
@@ -1712,35 +1760,17 @@ void setup_temperature_sensors()
   temps[right_panel_e].lower_bound_F = 10;
   temps[right_panel_e].upper_bound_F = 280;
 
-  // Give approximate initial values to the temperature readings so that at start up, we don't
-  // have values that are way off (we don't want to wait until the EMA catches up).  Run this
-  // many times and take the last reading.
+  // Give approximate initial values to the tank temperature.  Otherwise on startup, it
+  // can cause the Takagi and Spa electric heat enable to come on for a few minutes.  No
+  // harm in that, but can be slightly confusing.  We only do this for the tank temperature
+  // to save program space.
+
   const bool need_for_seed = true;
   if (need_for_seed) {
-    const int seed_samples = 50;
-    for (int i = 0 ; i < seed_samples ; i++ ) {
-      for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
-        int adc_value = analogRead(t->input_pin);
-        delay(2);   // Let ADC settle
-        float voltage = (float)adc_value * (5.0 / 1023.0);
-        float temp_C = (voltage - 0.5) * 100.0; /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C */
-        t->temperature_F += temp_C * (90.0 / 50.0) + 32.0 + t->calibration_offset_F;
-      }
-    }
-   
-    for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
-      t->temperature_F /= seed_samples;
-      
-      t->temperature_valid = t->temperature_F >= t->lower_bound_F && t->temperature_F <= t->upper_bound_F;
-    }
-    average_panel_temperature_F = (temps[left_panel_e].temperature_F + temps[right_panel_e].temperature_F) / 2.0;
-  
-    // Hack for spa temperature probe, which is not perfectly in the stream of spa water,
-    // but is affected by outside temperature.  When the panels are 34F, the spa temp is correctly
-    // set with the calibration_offset_F value we set in setup().  When the panels are 169, that's when
-    // it is warm outside and the spa sensor reads 6F higher than actual.
-    int correction_F = ((average_panel_temperature_F - 34.0) / 135.0) * 6.0;
-    temps[spa_e].temperature_F -= correction_F;
+    int adc_value = analogRead(temps[tank_e].input_pin);
+    float voltage = (float)adc_value * (5.0 / 1023.0);
+    float temp_C = (voltage - 0.5) * 100.0; /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C */
+    temps[tank_e].temperature_F += temp_C * (90.0 / 50.0) + 32.0 + temps[tank_e].calibration_offset_F;
   }
 }
 void setup_lcd(void)
@@ -1808,7 +1838,7 @@ void setup_i2c_bus(void)
            }
            quad_lv_relay1 = new Qwiic_Relay(address);
            if (quad_lv_relay1->begin() == 0) {
-             Serial.print(F("# Failure to start quad qwiic relay object"));
+             Serial.print(F("# Fail: r1"));
            }
            break;
 
@@ -1818,7 +1848,7 @@ void setup_i2c_bus(void)
            }
            quad_lv_relay2 = new Qwiic_Relay(address);
            if (quad_lv_relay2->begin() == 0) {
-             Serial.print(F("# Failure to start quad qwiic relay object"));
+             Serial.print(F("# Fail: r2"));
            }
            break;
 
@@ -1830,25 +1860,32 @@ void setup_i2c_bus(void)
           
          default:
           if (quad_lv_relay1 == (void *)0) {
-            Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
+            // Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
+            Serial.println(F(" UE1"));
             quad_lv_relay1 = new Qwiic_Relay(address);
             if (quad_lv_relay1->begin()) {
-              Serial.print(F("# Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
+              // Serial.print(F("# Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
+              Serial.println(F("# Wayward"));
               quad_lv_relay1->changeAddress(LV_RELAY1_I2C_ADDR);
             } else {
-              Serial.print(F("# unexpected device, unable to treat it as a quad qwiic relay\n"));
+              // Serial.print(F("# unexpected device, unable to treat it as a quad qwiic relay\n"));
+              Serial.println(F("# UE2"));
             }
           } else if (quad_lv_relay2 == (void *)0) {
-            Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
+            // Serial.print(F(" (unexpected, will guess that it is the Quad Qwiic Relay at the wrong address)\n"));
+            Serial.println(F(" UE3"));
             quad_lv_relay2 = new Qwiic_Relay(address);
             if (quad_lv_relay2->begin()) {
-              Serial.print(F("# Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
+              // Serial.print(F("# Wayward Qwiic relay found, remapping it to where it is suppose to be\n"));
+              Serial.println(F("# WW2"));
               quad_lv_relay1->changeAddress(LV_RELAY2_I2C_ADDR);
             } else {
-              Serial.print(F("# unexpected device, unable to treat it as a quad qwiic relay\n"));
+              // Serial.print(F("# unexpected device, unable to treat it as a quad qwiic relay\n"));
+              Serial.println(F("# UE4"));
             }
           } else {
-            Serial.print(F("# unexpected device after finding Qwiic quad relay\n"));
+            // Serial.print(F("# unexpected device after finding Qwiic quad relay\n"));
+            Serial.println(F("# UE5"));
           }
         }
         if (verbose_I2C) {
@@ -1857,7 +1894,8 @@ void setup_i2c_bus(void)
   
         nDevices++;
       } else if (error == 4) {
-        Serial.print(F("# Unknown error at address 0x"));
+        // Serial.print(F("# Unknown error at address 0x"));
+        Serial.println(F(" UE6"));
         if (address < 16) {
           Serial.print("0");
         }
