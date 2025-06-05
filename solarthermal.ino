@@ -778,7 +778,7 @@ void monitor_solar_pump_callback(void)
           if (h <= 9 || h >= 20) {
             record_error(F("wrong time of day for solar pump on"));
           } else {
-            if (roof_valves_status_in_tank_mode() && pool_heating_time() == false) {
+            if (roof_valves_status_in_tank_mode() && !pool_heating_time()) {
               turn_solar_pump_on();
             }
           }
@@ -1305,10 +1305,8 @@ void monitor_serial_console_callback(void)
       break;
     }
     if (received_char == '\n') {
-      if (debug_serial) {
-        Serial.print(F("# Received line: "));
-        Serial.println(received_command_buf);
-      }
+      Serial.print(F("# Received line: "));
+      Serial.println(received_command_buf);
       
       switch (received_command_buf[0]) {
         case 'd': // Set date command, "d year-month-day", e.g., "t 2025-05-23" to set the date
@@ -1735,7 +1733,6 @@ void setup_arduino_pins(void)
   pinMode(SPA_HEAT_DIGITAL_IN_PIN, INPUT_PULLUP);
   
   pinMode(ROOF_VALVES_STATUS_PIN, INPUT_PULLUP); 
-  
 }
 
 void setup_temperature_sensors()
@@ -1916,23 +1913,28 @@ void setup_rtc(void)
   // If we fail to communicate with the RTC (a DS3231), set the time and date to the build time of this software.
   if(!rtc.begin()) {
     record_error(F("No RTC"));
-    int hh, mmin, ss, dd, mm, yy;
-    char monthStr[4];
-    sscanf(__TIME__, "%d:%d:%d", &hh, &mmin, &ss);
-    sscanf(__DATE__, "%s %d %d", monthStr, &dd, &yy);
-    int month = (strcmp(monthStr, "Jan") == 0) ? 1 :
-                  (strcmp(monthStr, "Feb") == 0) ? 2 :
-                  (strcmp(monthStr, "Mar") == 0) ? 3 :
-                  (strcmp(monthStr, "Apr") == 0) ? 4 :
-                  (strcmp(monthStr, "May") == 0) ? 5 :
-                  (strcmp(monthStr, "Jun") == 0) ? 6 :
-                  (strcmp(monthStr, "Jul") == 0) ? 7 :
-                  (strcmp(monthStr, "Aug") == 0) ? 8 :
-                  (strcmp(monthStr, "Sep") == 0) ? 9 :
-                  (strcmp(monthStr, "Oct") == 0) ? 10 :
-                  (strcmp(monthStr, "Nov") == 0) ? 11 : 12;
+    // Setting the date and time from the last build date is a desperate move.  In the case
+    // of no RTC, we'll still have the right time if connected to the host, which will issue time-set
+    // commands.  If it isn't connected to the host, then we have get the RTC fixed if it is broken
+    // (which it hasn't been, this is just defensive code I copied from somewhere)
 
-    setTime(hh, mmin, ss, dd, month, yy);
+    // int hh, mmin, ss, dd, mm, yy;
+    // char monthStr[4];
+    // sscanf(__TIME__, "%d:%d:%d", &hh, &mmin, &ss);
+    // sscanf(__DATE__, "%s %d %d", monthStr, &dd, &yy);
+    // int month = (strcmp(monthStr, "Jan") == 0) ? 1 :
+    //               (strcmp(monthStr, "Feb") == 0) ? 2 :
+    //               (strcmp(monthStr, "Mar") == 0) ? 3 :
+    //               (strcmp(monthStr, "Apr") == 0) ? 4 :
+    //               (strcmp(monthStr, "May") == 0) ? 5 :
+    //               (strcmp(monthStr, "Jun") == 0) ? 6 :
+    //               (strcmp(monthStr, "Jul") == 0) ? 7 :
+    //               (strcmp(monthStr, "Aug") == 0) ? 8 :
+    //               (strcmp(monthStr, "Sep") == 0) ? 9 :
+    //               (strcmp(monthStr, "Oct") == 0) ? 10 :
+    //               (strcmp(monthStr, "Nov") == 0) ? 11 : 12;
+
+    // setTime(hh, mmin, ss, dd, month, yy);
     monitor_clock.disable();
   } else {
     if(rtc.lostPower() || force_RTC_reload_from_build_time ) {
