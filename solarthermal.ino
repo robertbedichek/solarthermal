@@ -60,7 +60,7 @@ SerLCD *lcd;
 const bool fast_lcd_comm = false;
 
 // This string variable is used by multiple functions below, but not at the same time
-char cbuf[70];
+char cbuf[40];
 
 #define _TASK_SLEEP_ON_IDLE_RUN
 #include <TaskScheduler.h>
@@ -219,7 +219,7 @@ volatile bool minus_key_pressed = false;
 // We used to have two ways of recognizing pressed keys, the interrupt method and the polling method.
 // Our prefered and default method is via interrupts.  If we get a future peripheral with conflicting
 // resource needs (e.g., SoftSerial) or we want to try polling to isolate certain bugs, we may want
-// to enabling polling, so the option remains in the code.  In this case, look at the code frombefore May 31,
+// to enabling polling.  In this case, look at the code frombefore May 31,
 // 2025.
 
 ISR(PCINT2_vect) 
@@ -1184,7 +1184,7 @@ void print_periodic_header_and_summary_data(void)
       daily_stats_reset = false;
     }
   }
-  Serial.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Clsd Roof Pool Time Erro"));
+  Serial.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Clsd Roof Pool Time Erro Mode"));
 }
 // Called periodically.  More frequently after starting, then slows.
 //  Sends relevant telemetry back over the USB-serial link.
@@ -1209,6 +1209,7 @@ void print_status_to_serial_callback(void)
   static bool last_spa_closed;
   static bool last_roof_valves_to_pool;
   static bool last_pool_heat;
+  static operating_mode_t last_operating_mode;
   
   // Only print a line if the tank's temperature has shifted by more than on degree, the average panel temp by more than 2
   // or any of the booleans.
@@ -1223,6 +1224,7 @@ void print_status_to_serial_callback(void)
       last_spa_closed != spa_heat_ex_valve_status_closed() ||
       last_roof_valves_to_pool != !roof_valves_status_in_tank_mode() ||
       last_pool_heat != pool_heat_request_relay_on() ||
+      last_operating_mode != operating_mode ||
       records_skipped++ > 1200) {
 
     last_tank_F = (int)temps[tank_e].temperature_F;
@@ -1235,6 +1237,7 @@ void print_status_to_serial_callback(void)
     last_spa_closed = spa_heat_ex_valve_status_closed();
     last_roof_valves_to_pool = !roof_valves_status_in_tank_mode();
     last_pool_heat = pool_heat_request_relay_on();
+    last_operating_mode = operating_mode;
 
     // We generate the output line in chunks, to conversve memory.  But it also makes the code easier to
     // read because we don't have one humongous snprintf().  The size of buf is carefully chosen to be just large enough.
@@ -1259,18 +1262,23 @@ void print_status_to_serial_callback(void)
         (int)temps[spa_e].temperature_F);
     Serial.print(cbuf);
 
-    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d %4d %4d %4d %4d %4d", 
+    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d ",
         spa_heater_relay_on(),
         solar_pump_on(),
         recirc_pump_on(),
         takagi_on(),
         spa_calling_for_heat(),
-        spa_heat_ex_valve_status_open(),
+        spa_heat_ex_valve_status_open());
+    Serial.print(cbuf);
+
+
+    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d %4d ",
         spa_heat_ex_valve_status_closed(),
         !roof_valves_status_in_tank_mode(),
         pool_heat_request_relay_on(),
         valve_timeout,
-        valve_error);
+        valve_error,
+        operating_mode);
     
     Serial.println(cbuf);
     line_counter--;
