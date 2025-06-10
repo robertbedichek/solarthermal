@@ -270,12 +270,11 @@ Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callba
 Task monitor_roof_valves(TASK_SECOND, TASK_FOREVER, &monitor_roof_valves_callback, &ts, true);
 
 bool pool_heating_season(void); // Returns true when today is a day we might heat the pool
-bool pool_heating_time(void);   // Returns true if this time and date are when we might heat the pool
 bool pool_heating_inop = false; // Set true if heating the pool doesn't work
-bool sequencing_to_heat_pool = false;
+
 /*****************************************************************************************************/
 
-const unsigned long solar_pump_delay = 300;         // Minimum number of seconds between solar pump on events
+const unsigned long solar_pump_delay = 5 * 60 * 1000UL;         // Five minutes between solar pump on events
 
 float average_panel_temperature_F;   // Average of leftmost and rightmost panels
 
@@ -288,8 +287,8 @@ unsigned long solar_pump_on_off_time;   // Set to millis()  when pump is turned 
 unsigned daily_seconds_of_solar_pump_on_time; // Number of seconds the solar pump has run today
 
 bool solar_pump_on(void);
-void turn_solar_pump_on(void);
-void turn_solar_pump_off(void);
+void turn_solar_pump_on(const __FlashStringHelper *message);
+void turn_solar_pump_off(const __FlashStringHelper *message);
 Task monitor_solar_pump(TASK_SECOND * 60, TASK_FOREVER, &monitor_solar_pump_callback, &ts, true);
 /*****************************************************************************************************/
 bool spa_heater_relay_on(void);             // True if we have enabled the spa heater relay, off by default
@@ -304,8 +303,8 @@ unsigned long pool_heat_request_relay_on_off_time;
 const unsigned recirc_on_time_in_seconds = 90;
 bool recirc_pump_on();
 
-void turn_recirc_pump_on(void);
-void turn_recirc_pump_off(void);
+void turn_recirc_pump_on(const __FlashStringHelper *message);
+void turn_recirc_pump_off(const __FlashStringHelper *message);
 
 Task monitor_recirc_pump(TASK_SECOND * 10, TASK_FOREVER, &monitor_recirc_pump_callback, &ts, true);
 /*****************************************************************************************************/
@@ -315,8 +314,8 @@ const int takagi_off_threshold_F = 125; // If the tank is this or above, turn th
 
 bool takagi_on(void);
 
-void turn_takagi_on(void);
-void turn_takagi_off(void);
+void turn_takagi_on(const __FlashStringHelper *message);
+void turn_takagi_off(const __FlashStringHelper *message);
 
 unsigned daily_seconds_of_takagi_on_time;
 unsigned takagi_on_time;                 // Set to millis() the last time the Takagi was turned on
@@ -600,38 +599,32 @@ void process_pressed_keys_callback(void)
         break;
 
       case m_poolheat:
-        turn_pool_heat_request_relay_on();
-        Serial.print(F("# pool heat req="));
+        turn_pool_heat_request_relay_on(F("# pool heat req="));
         Serial.println(pool_heat_request_relay_on());
         break;
 
       case m_roof_valves:
-        turn_roof_valves_to_pool_mode();
-        Serial.print(F("# roof valves status="));
+        turn_roof_valves_to_pool_mode(F("# roof valves status="));
         Serial.println(roof_valves_status_in_tank_mode() ? F("tank mode") : F("pool mode"));
         break;
 
       case m_rpump:
-        turn_recirc_pump_on();
-        Serial.print(F("# recirc pump="));
+        turn_recirc_pump_on(F("# recirc pump="));
         Serial.println(recirc_pump_on());
         break;
 
       case m_spump:
-        turn_solar_pump_on();
-        Serial.print(F("# solar pump="));
+        turn_solar_pump_on(F("# solar pump="));
         Serial.println(solar_pump_on());
         break;
 
       case m_takagi:
-        turn_takagi_on();
-        Serial.print(F("# Takagi=%d"));
+        turn_takagi_on(F("# Takagi=%d"));
         Serial.println(takagi_on());
         break;
 
       case m_spa_hex_valve:          
-        open_spa_heat_exchanger_valve();
-        Serial.print(F("# spa valve open="));
+        open_spa_heat_exchanger_valve(F("# spa valve open="));
         Serial.print(spa_heat_ex_valve_status_open());
         Serial.print(F(" closed="));
         Serial.println(spa_heat_ex_valve_status_closed());
@@ -641,8 +634,7 @@ void process_pressed_keys_callback(void)
         break;
 
       case m_spa_elec:
-        turn_spa_heater_relay_on();
-        Serial.print(F("# spa heater relay="));
+        turn_spa_heater_relay_on(F("# spa heater relay="));
         Serial.println(spa_heater_relay_on());
         break; 
     }
@@ -656,32 +648,27 @@ void process_pressed_keys_callback(void)
         break;
 
       case m_poolheat:
-        turn_pool_heat_request_relay_off();
-        Serial.print(F("# pool heat req="));
+        turn_pool_heat_request_relay_off(F("# pool heat req="));
         Serial.println(pool_heat_request_relay_on());
         break;
 
       case m_roof_valves:
-        turn_roof_valves_to_tank_mode();
-        Serial.print(F("# roof valve status="));
+        turn_roof_valves_to_tank_mode(F("# roof valve status="));
         Serial.println(roof_valves_status_in_tank_mode() ? F("tank mode") : F("pool mode"));
         break;
 
       case m_rpump:
-        turn_recirc_pump_off();
-        Serial.print(F("# recirc pump="));
+        turn_recirc_pump_off(F("# recirc pump="));
         Serial.println(recirc_pump_on());
         break;
 
       case m_spump:
-        turn_solar_pump_off();
-        Serial.print(F("# solar pump="));
+        turn_solar_pump_off(F("# solar pump="));
         Serial.println(solar_pump_on());
         break;
 
       case m_takagi:
-        turn_takagi_off();
-        Serial.print(F("# Takagi="));
+        turn_takagi_off(F("# Takagi="));
         Serial.println(takagi_on());
         break;
 
@@ -694,8 +681,7 @@ void process_pressed_keys_callback(void)
         break;
 
       case m_spa_elec:
-        turn_spa_heater_relay_off();
-        Serial.print(F("# spa heater relay="));
+        turn_spa_heater_relay_off(F("# spa heater relay="));
         Serial.println(spa_heater_relay_on());
         break; 
     }
@@ -716,14 +702,20 @@ bool solar_pump_on()
   return digitalRead(SSR_SOLAR_PUMP_PIN) == LOW;
 }
 
-void turn_solar_pump_on(void)
+void turn_solar_pump_on(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   solar_pump_on_off_time = millis();
   digitalWrite(SSR_SOLAR_PUMP_PIN, LOW); // Turn on solar pump
 }
 
-void turn_solar_pump_off(void)
+void turn_solar_pump_off(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   if (solar_pump_on()) {
     daily_seconds_of_solar_pump_on_time += (millis() - solar_pump_on_off_time) / 1000;
   }
@@ -758,9 +750,8 @@ void monitor_solar_pump_callback(void)
             // Make the pool controller as not working and switch back to heating 
             // the termal mass 
             pool_heating_inop = true;
-            sequencing_to_heat_pool = false;
-            turn_pool_heat_request_relay_off();      
-            turn_roof_valves_to_tank_mode();
+            turn_pool_heat_request_relay_off(F("# heating pool water failed"));      
+            turn_roof_valves_to_tank_mode(F("# go back to heating the tank"));
             if (spew_counter < 20) {
               Serial.println(F("# alert panel overtemp with pool request"));
               spew_counter++;
@@ -774,13 +765,9 @@ void monitor_solar_pump_callback(void)
     if (temps[tank_e].temperature_valid) {
       if (!solar_pump_on() && temps[tank_e].temperature_F < 165 &&
           average_panel_temperature_F > (temps[tank_e].temperature_F + tank_panel_difference_threshold_on_F)) {
-        if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
-          if (h <= 9 || h >= 20) {
-            record_error(F("wrong time of day for solar pump on"));
-          } else {
-            if (roof_valves_status_in_tank_mode() && !pool_heating_time()) {
-              turn_solar_pump_on();
-            }
+        if (roof_valves_status_in_tank_mode()) {
+          if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
+            turn_solar_pump_on((void *)0);
           }
         }
       }
@@ -788,43 +775,48 @@ void monitor_solar_pump_callback(void)
       if (solar_pump_on()) {
         // If the tank is too hot in absolute valve or the tank is too warm in comparison to the panels,
         // then turn the solar pump off.
-        if (temps[tank_e].temperature_F > 170 ||
-            (average_panel_temperature_F < (temps[tank_e].temperature_F + tank_panel_difference_threshold_off_F))) {
-          turn_solar_pump_off();
-        } 
-        
-        if (h >= 20) {
-          turn_solar_pump_off();
-          record_error(F("solar pump still on at 8PM"));
-        }
-        if (pool_heating_time() && !pool_heating_inop && temps[tank_e].temperature_F > 135) {
-          // During summer months, turn off the solar pump in the afternoon if the thermal
-          // mass is warm enough to last through the night.  This is to allow the pool to be
-          // heate.  But only do this if we haven't given up on the pool heat.
-          turn_solar_pump_off();
+        if (temps[tank_e].temperature_F > 170) {
+          turn_solar_pump_off(F("# alert tank too hot, turning off solar pump"));
+        } else if (average_panel_temperature_F < (temps[tank_e].temperature_F + tank_panel_difference_threshold_off_F)) {
+          turn_solar_pump_off(F("# panels too cold, turn off solar pump"));
+        } else if (h >= 20) {
+          turn_solar_pump_off(F("# alert solar pump still on at 8PM"));
+        } else if (pool_heating_season() && !pool_heating_inop && temps[tank_e].temperature_F > 140) {
+          if ((millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
+            // During summer months, turn off the solar pump  if the thermal
+            // mass is warm enough to last through the night and we have run the solar pump for at
+            // least an hour.  This is to allow the pool to be heat.  But only do this if we 
+            // haven't given up on the pool heat.
+            turn_solar_pump_off((void *)0);
+          }
         }
       }
     } else {
       // The panel temperature is valid, but the tank temperature is not.  Just turn on the pump if the panels are above
       // 170F and turn it off at 1700.
-      if (pool_heating_time() == false && 
-         solar_pump_on() == false && 
-         average_panel_temperature_F > 170 && 
-         roof_valves_status_in_tank_mode()) {
-        turn_solar_pump_on();
-      }
-      if (solar_pump_on() && h >= 17) {
-        turn_solar_pump_off();
+      if (!solar_pump_on() && average_panel_temperature_F > 170 && roof_valves_status_in_tank_mode()) {
+        if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
+          turn_solar_pump_on((void *)0);
+        }
+      } else if (solar_pump_on() && h >= 17) {
+        if ((millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
+          turn_solar_pump_off((void *)0);
+        }
       }
     }
   } else {
     // We can't use the panel temperature, so just turn on the solar pump in the late morning and turn it off in the late
     // afternoon
-    if (!pool_heating_time() && !solar_pump_on() && h >= 11 && roof_valves_status_in_tank_mode()) {
-      turn_solar_pump_on();
-    }
-    if (solar_pump_on() && h >= 17) {
-      turn_solar_pump_off();
+    if (!solar_pump_on() && h >= 11 && roof_valves_status_in_tank_mode()) {
+      if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
+        turn_solar_pump_on((void *)0);
+      }
+    } else if (solar_pump_on() && h >= 17) {
+      // If we don't know the panel temperatures and we have run the solar pump for at least an hour and it is after 5PM,
+      // turn off the solar pump.
+      if ((millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
+        turn_solar_pump_off((void *)0);
+      }
     }
   }
 }
@@ -834,16 +826,22 @@ bool spa_heater_relay_on(void)
   return quad_lv_relay1->getState(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
 }
 
-void turn_spa_heater_relay_on(void)
+void turn_spa_heater_relay_on(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.print(message);
+  }
   if (quad_lv_relay1 != 0) {
     spa_heater_relay_on_time = millis();
     quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
   }
 }
 
-void turn_spa_heater_relay_off(void)
+void turn_spa_heater_relay_off(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.print(message);
+  }
   if (quad_lv_relay1 != 0) {
     daily_seconds_of_spa_heater_on_time += (millis() - spa_heater_relay_on_time) / 1000;
     quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
@@ -855,16 +853,22 @@ bool pool_heat_request_relay_on(void)
   return quad_lv_relay2->getState(LV_RELAY2_POOL_HEAT_REQUEST);
 }
 
-void turn_pool_heat_request_relay_on(void)
+void turn_pool_heat_request_relay_on(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.print(message);
+  }
   if (quad_lv_relay1 != 0) {
     pool_heat_request_relay_on_off_time = millis();
     quad_lv_relay2->turnRelayOn(LV_RELAY2_POOL_HEAT_REQUEST);
   }
 }
 
-void turn_pool_heat_request_relay_off(void)
+void turn_pool_heat_request_relay_off(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.print(message);
+  }
   if (quad_lv_relay1 != 0) {
     // daily_seconds_of_pool_heat_request_on_time += (millis() - pool_heat_request_relay_on_time) / 1000;
     quad_lv_relay2->turnRelayOff(LV_RELAY2_POOL_HEAT_REQUEST);
@@ -895,7 +899,7 @@ void monitor_spa_electric_heat_callback(void)
         unsigned long seconds_spa_heater_relay_on = (millis() - spa_heater_relay_on_time) / 1000;
         if (temps[tank_e].temperature_F >= 115 && 
             (seconds_spa_heater_relay_on > 3600) || !spa_calling_for_heat()) {
-          turn_spa_heater_relay_off();
+          turn_spa_heater_relay_off((void *)0);
         }
       } else {
         
@@ -913,17 +917,15 @@ void monitor_spa_electric_heat_callback(void)
                 spa_heater_relay_on(), spa_heat_ex_valve_status_open(), spa_heat_ex_valve_status_closed(), seconds_valve_open);
               Serial.println(cbuf);
            }
-          turn_spa_heater_relay_on();
+          turn_spa_heater_relay_on((void *)0);
         }
       }
     }
   } else {
     if (spa_heater_relay_on() == false) {
       // If the tank temperature is not valid, play it safe and turn on the electric heater
-      Serial.print(F("# tank temp invalid, spa heater on, t="));
+      turn_spa_heater_relay_on(F("# tank temp invalid, spa heater on, t="));
       Serial.print((int)temps[tank_e].temperature_F);
-
-      turn_spa_heater_relay_on();
     }
   }
   check_free_memory(F("monitor_spa_ exit"));
@@ -960,8 +962,11 @@ bool spa_heat_ex_valve_status_closed(void)
 // This intiates the valve opening process by applying the correct polarity of power to the valve motor
 // and by enabling the task that monitors the opening process.
 
-void open_spa_heat_exchanger_valve(void)
+void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   bool motion =  monitor_valve_motion.isEnabled();
   bool ok_to_move_valve = false;
   ok_to_move_valve |= operating_mode == m_spa_hex_valve;  // Allow movement in diag mode for this valve
@@ -1104,7 +1109,7 @@ void monitor_spa_valve_callback(void)
         if (temps[tank_e].temperature_F >= 113 &&
             spa_heat_ex_valve_status_open() == false &&
             valve_not_in_motion && operating_mode == m_oper) {
-          open_spa_heat_exchanger_valve();
+          open_spa_heat_exchanger_valve((void *)0);
         } else if (spa_heat_ex_valve_status_closed() == false && (temps[tank_e].temperature_F <= 110) &&
             valve_not_in_motion) {
   
@@ -1225,7 +1230,7 @@ void print_status_to_serial_callback(void)
       last_roof_valves_to_pool != !roof_valves_status_in_tank_mode() ||
       last_pool_heat != pool_heat_request_relay_on() ||
       last_operating_mode != operating_mode ||
-      records_skipped++ > 1200) {
+      records_skipped++ > 800) {
 
     last_tank_F = (int)temps[tank_e].temperature_F;
     last_avg_panel_F = (int)average_panel_temperature_F;
@@ -1430,13 +1435,19 @@ bool recirc_pump_on(void)
   return digitalRead(SSR_RECIRC_PUMP_PIN) == LOW;
 }
 
-void turn_recirc_pump_on(void) 
+void turn_recirc_pump_on(const __FlashStringHelper *message) 
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   digitalWrite(SSR_RECIRC_PUMP_PIN, LOW); // Ground the low side of the SSR, turning on recirculation pump
 }
 
-void turn_recirc_pump_off(void) 
+void turn_recirc_pump_off(const __FlashStringHelper *message) 
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   digitalWrite(SSR_RECIRC_PUMP_PIN, HIGH); // Un-Ground the low side of the SSR, turning off recirculation pump
 }
 
@@ -1457,14 +1468,14 @@ void monitor_recirc_pump_callback(void)
       case 0: 
       case 30:
         if (recirc_pump_on() == false) {
-          turn_recirc_pump_on();
+          turn_recirc_pump_on((void *)0);
         }
         break;
 
       case 2:
       case 32:
         if (recirc_pump_on() == true) {
-          turn_recirc_pump_off();
+          turn_recirc_pump_off((void *)0);
         }
         break;
 
@@ -1479,8 +1490,9 @@ bool takagi_on()
   return digitalRead(SSR_TAKAGI_PIN) == LOW;
 }
 
-void turn_roof_valves_to_tank_mode(void)
+void turn_roof_valves_to_tank_mode(const __FlashStringHelper *message)
 {
+  Serial.println(message);
   if (quad_lv_relay2 != (void *)0) {
     turn_roof_valves_power_on();
     quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
@@ -1491,7 +1503,7 @@ void turn_roof_valves_to_tank_mode(void)
   }
 }
 
-void turn_roof_valves_to_pool_mode(void)
+void turn_roof_valves_to_pool_mode(const __FlashStringHelper *caller)
 {
   if (quad_lv_relay2 != (void *)0) {
     turn_roof_valves_power_on();
@@ -1552,15 +1564,6 @@ bool roof_valves_set_to_pool_mode(void)
 
 const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
 
-
-// Returns true if this time and date are when we might heat the pool
-
-bool pool_heating_time(void)
-{
-  int h = hour(arduino_time);
-  return pool_heating_season() && (h >= 14 && h < 19) && !pool_heating_inop;
-}   
-
 // Returns true when today is a day we might heat the pool
 bool pool_heating_season(void)
 {
@@ -1574,29 +1577,29 @@ void monitor_roof_valves_callback()
     turn_roof_valves_power_off();
   }
 
-  // If the solar pump is off, this is the time of day and day of year when we are to heat the pool,
+  // If the solar pump is off and the tank is hot, and this is a day in the pool heating season,
   //  and we are not yet requesting that the pool controller send pool water to the roof, and we
   // have not given up on heating the pool (i.e., we haven't marked it "INOP"), then
   // first turn the roof valves to pool mode once the solar pump has been off for two minutes
   // and then turn the pool-heat-request-relay on at least 20 seconds after we have started
   // the roof valves in motion.
 
-  if (!solar_pump_on() && !pool_heat_request_relay_on() && pool_heating_time()) {
+  if (!solar_pump_on() && !pool_heat_request_relay_on() && pool_heating_season() &&
+      temps[tank_e].temperature_valid && temps[tank_e].temperature_F >= 140) {
     // If we have given the tank water to drain back to the tank, then turn the roof
     // valves to pool mode.
-    sequencing_to_heat_pool = true;
+
     if (roof_valves_set_to_tank_mode()) {
-      if ((millis() - solar_pump_on_off_time) > 120 * 1000UL) {
-        turn_roof_valves_to_pool_mode();
-        Serial.println(F("# turning roof valves to pool"));
+      if ((millis() - solar_pump_on_off_time) > 2 * 60 * 1000UL) {
+        turn_roof_valves_to_pool_mode(F("# turning roof valves to pool"));
       }
     }
   
    //then make that request to the pool controller if it has been more
-  // than 20 seconds since we started the roof valves in motion
+   // than 30 seconds since we started the roof valves in motion
   
-    if (roof_valves_set_to_pool_mode()) {
-      if ((millis() - roof_valves_motion_start_time) > 20000UL) {
+    if (roof_valves_set_to_pool_mode() && average_panel_temperature_F > 100) {
+      if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
         if (roof_valves_status_in_tank_mode()) {
           static unsigned char spew_counter;
           if (spew_counter < 10) {
@@ -1604,32 +1607,32 @@ void monitor_roof_valves_callback()
             spew_counter++;
           }
         } else {
-          turn_pool_heat_request_relay_on();
-          Serial.println(F("# pool-heat request"));
+          turn_pool_heat_request_relay_on(F("# pool-heat request\n"));
         }
       } 
     }
   }
 
-   // Turn off pool-heat request if the pool heating has failed or it is not the right time of day.
-  if (!pool_heating_time() && pool_heat_request_relay_on()) {
-    turn_pool_heat_request_relay_off();
-    sequencing_to_heat_pool = false;
-    Serial.println(F("# pool heat request off: TOD"));
-  }
-
+   // Turn off pool-heat request if the the panels are too cold to be effective
+   // for even heating the pool
+  if (pool_heat_request_relay_on()) {
+    if (average_panel_temperature_F < 90.0) {
+      turn_pool_heat_request_relay_off(F("# pool heat request off: low panel temperature\n"));
+    } else if (!pool_heating_season()) {
+      turn_pool_heat_request_relay_off(F("# pool heat request off: not pool heating season"));
+    }
+  } else {
   // If the roof valves are set to to pool-heat mode, but we are no longer asking for 
   // the pool pump controller to send pool water to the roof, and
-  // it has been two minutes since we de-asserted the pool heat request, assume
+  // it has been twenty minutes since we de-asserted the pool heat request, assume
   // the panels have drained of pool water and turn the roof valves back to tank mode
 
-  if (roof_valves_set_to_pool_mode() && !sequencing_to_heat_pool &&
-      (millis() - pool_heat_request_relay_on_off_time) > (120 * 1000UL)) {
-    turn_roof_valves_to_tank_mode();
-    Serial.println(F("# roof valves to tank mode after drain-down"));
+    if (roof_valves_set_to_pool_mode() &&
+        (millis() - pool_heat_request_relay_on_off_time) > (20 * 60 * 1000UL)) {
+      turn_roof_valves_to_tank_mode(F("# roof valves to tank mode after drain-down"));
+    }
   }
-
-  if ((millis() - roof_valves_motion_start_time) > 30000UL) {
+  if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
     static unsigned spew_count;
     if (roof_valves_status_in_tank_mode() != roof_valves_set_to_tank_mode() && spew_count < 20) {
       Serial.println(F("# alert roof valve status mismatch"));
@@ -1637,14 +1640,21 @@ void monitor_roof_valves_callback()
     }
   }
 }
-void turn_takagi_on(void)
+
+void turn_takagi_on(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   takagi_on_time = millis();
   digitalWrite(SSR_TAKAGI_PIN, LOW); // Turn on Takagi flash heater
 }
 
-void turn_takagi_off(void)
+void turn_takagi_off(const __FlashStringHelper *message)
 {
+  if (message != (void *)0) {
+    Serial.println(message);
+  }
   if (takagi_on_time > 0) {
     daily_seconds_of_takagi_on_time += (millis() - takagi_on_time) / 1000;
     takagi_on_time = 0;
@@ -1660,16 +1670,16 @@ void monitor_takagi_callback(void)
   if (operating_mode == m_oper || operating_mode == m_safe) {
     if (temps[tank_e].temperature_valid) {
       if (takagi_on() && temps[tank_e].temperature_F >= takagi_off_threshold_F) {
-        turn_takagi_off();
+        turn_takagi_off((void *)0);
       } else if (takagi_on() == false && temps[tank_e].temperature_F <  takagi_on_threshold_F) {
         if (last_takagi_change == 0 || (millis() - last_takagi_change) > TAKAGI_DELAY) {
-          turn_takagi_on();
+          turn_takagi_on((void *)0);
           last_takagi_change = millis();
         }
       }
     } else {
       // If the tank temperature isn't valid, then just turn on the Takagi and leave it on
-      turn_takagi_on();
+      turn_takagi_on((void *)0);
     }
   }
 }
@@ -1726,13 +1736,13 @@ void setup_arduino_pins(void)
   pinMode(KEY_3_PIN, INPUT_PULLUP);
   pinMode(KEY_4_PIN, INPUT_PULLUP);
 
-  turn_solar_pump_off();
+  turn_solar_pump_off((void *)0);
   pinMode(SSR_SOLAR_PUMP_PIN, OUTPUT); 
 
-  turn_recirc_pump_off();
+  turn_recirc_pump_off((void *)0);
   pinMode(SSR_RECIRC_PUMP_PIN, OUTPUT);
 
-  turn_takagi_off();
+  turn_takagi_off((void *)0);
   pinMode(SSR_TAKAGI_PIN, OUTPUT);       // Pin 13, which is also the Arduino LED control.  LED is off when Takagi on, LED on when Takagi is off
   
   pinMode(SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN, INPUT_PULLUP);
@@ -2005,15 +2015,9 @@ void setup(void)
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
   Serial.println(F("# alert reboot"));              // Put the first line we print on a fresh line (i.e., left column of output)
   setup_i2c_bus(); // This sets "quad_lv_relay1"
-    
-  // Ensure that the motorized valve is unpowered
-  if (quad_lv_relay1 != 0) {
-    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
-    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
 
-    // By default, the spa electric heater is unpowered.  If the tank is too
-    // cold, it will quickly be turned back on.
-    quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
+  if (pool_heat_request_relay_on() && roof_valves_set_to_tank_mode()) {
+    turn_pool_heat_request_relay_off(F("# alert: request relay on, but roof valves in tank mode\n"));
   }
   setup_lcd();
   setup_rtc();
