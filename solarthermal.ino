@@ -396,9 +396,108 @@ long readVcc()
   return 1125300L / result;  // 1.1V * 1023 * 1000
 }
 
+
+// This returns true if the status input says that the roof valves are in
+// tank mode.
+bool roof_valves_status_in_tank_mode()
+{
+  return digitalRead(ROOF_VALVES_STATUS_PIN) == LOW;
+}
+
+// This returns true if our relays that control the roof valves are set to
+// turn the roof vavles to tank mode().  There can be a delay between when
+// this is true and roof_valves_status_in_tank_mode() becomes true as it
+// takes a few seconds for the diverter valve to turn.
+bool roof_valves_set_to_tank_mode()
+{
+  bool r1 = false;
+  if (quad_lv_relay2 != (void *)0) {
+   r1 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_THERMAL_MASS) == LOW;
+    bool r2 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POOL) == LOW;
+    if (r1 != r2) {
+      static unsigned char alert_spew;
+      if (alert_spew < 20) {
+        Serial.println(F("# alert roof_valves_set_to_tank_mode() mismatch"));
+        alert_spew++;
+      }
+    }
+  }
+  return r1;
+}
+
+bool roof_valves_set_to_pool_mode(void)
+{
+  return !roof_valves_set_to_tank_mode();
+}
+
 bool spa_calling_for_heat(void)
 {
   return digitalRead(SPA_HEAT_DIGITAL_IN_PIN) == LOW;
+}
+
+bool takagi_on()
+{
+  return digitalRead(SSR_TAKAGI_PIN) == LOW;
+}
+
+void turn_roof_valves_to_tank_mode(const __FlashStringHelper *message)
+{
+  Serial.print(message);
+  if (quad_lv_relay2 != (void *)0) {
+    turn_roof_valves_power_on();
+    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
+    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_POOL);
+  }
+  if (roof_valves_set_to_pool_mode()) {
+    record_error(F("turn_roof_valves_to_tank_mode()"));
+  }
+}
+
+void turn_roof_valves_to_pool_mode(const __FlashStringHelper *message)
+{
+  Serial.print(message);
+  turn_roof_valves_power_on();
+  if (quad_lv_relay2 != (void *)0) {
+    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
+    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_POOL);
+  }
+  if (roof_valves_set_to_tank_mode()) {
+    record_error(F("turn_roof_valves_to_pool_mode()"));
+  }
+}
+
+void turn_roof_valves_power_on(void)
+{
+  roof_valves_motion_start_time = millis();
+  if (quad_lv_relay2 != (void *)0) {
+    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_POWER);
+  }
+}
+
+void turn_roof_valves_power_off(void)
+{
+  if (quad_lv_relay2 != (void *)0) {
+    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_POWER);
+  }
+}
+// Returns true if the roof valves are powered
+
+bool roof_valves_power_is_on(void)
+{
+  bool v = false;  
+  if (quad_lv_relay2 != (void *)0) {
+    v = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POWER);
+  } 
+  return v;
+}
+
+const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
+
+// Returns true when today is a day we might heat the pool
+bool pool_heating_season(void)
+{
+  int m = month(arduino_time);
+  return (m >= 5 && m <= 9);
 }
 
 /*
@@ -823,7 +922,11 @@ void monitor_solar_pump_callback(void)
 
 bool spa_heater_relay_on(void)
 {
-  return quad_lv_relay1->getState(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
+  bool v = false;
+  if (quad_lv_relay1 != (void *)0) {
+    v = quad_lv_relay1->getState(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
+  }
+  return v;
 }
 
 void turn_spa_heater_relay_on(const __FlashStringHelper *message)
@@ -831,8 +934,8 @@ void turn_spa_heater_relay_on(const __FlashStringHelper *message)
   if (message != (void *)0) {
     Serial.print(message);
   }
-  if (quad_lv_relay1 != 0) {
-    spa_heater_relay_on_time = millis();
+  spa_heater_relay_on_time = millis();
+  if (quad_lv_relay1 != (void *)0) {    
     quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
   }
 }
@@ -842,15 +945,19 @@ void turn_spa_heater_relay_off(const __FlashStringHelper *message)
   if (message != (void *)0) {
     Serial.print(message);
   }
-  if (quad_lv_relay1 != 0) {
-    daily_seconds_of_spa_heater_on_time += (millis() - spa_heater_relay_on_time) / 1000;
+  daily_seconds_of_spa_heater_on_time += (millis() - spa_heater_relay_on_time) / 1000;
+  if (quad_lv_relay1 != (void *)0) {
     quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_ELEC_HEAT_ENABLE);
   }
 }
 
 bool pool_heat_request_relay_on(void)
 {
-  return quad_lv_relay2->getState(LV_RELAY2_POOL_HEAT_REQUEST);
+  bool v = false;
+  if (quad_lv_relay2 != (void *)0) {
+    v = quad_lv_relay2->getState(LV_RELAY2_POOL_HEAT_REQUEST);
+  }
+  return v;
 }
 
 void turn_pool_heat_request_relay_on(const __FlashStringHelper *message)
@@ -858,8 +965,8 @@ void turn_pool_heat_request_relay_on(const __FlashStringHelper *message)
   if (message != (void *)0) {
     Serial.print(message);
   }
-  if (quad_lv_relay1 != 0) {
-    pool_heat_request_relay_on_off_time = millis();
+  pool_heat_request_relay_on_off_time = millis();
+  if (quad_lv_relay1 != (void *)0) {
     quad_lv_relay2->turnRelayOn(LV_RELAY2_POOL_HEAT_REQUEST);
   }
 }
@@ -869,10 +976,10 @@ void turn_pool_heat_request_relay_off(const __FlashStringHelper *message)
   if (message != (void *)0) {
     Serial.print(message);
   }
-  if (quad_lv_relay1 != 0) {
+  pool_heat_request_relay_on_off_time = millis();
+  if (quad_lv_relay1 != (void *)0) {
     // daily_seconds_of_pool_heat_request_on_time += (millis() - pool_heat_request_relay_on_time) / 1000;
     quad_lv_relay2->turnRelayOff(LV_RELAY2_POOL_HEAT_REQUEST);
-    pool_heat_request_relay_on_off_time = millis();
   }
 }
 
@@ -970,8 +1077,8 @@ void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
   bool motion =  monitor_valve_motion.isEnabled();
   bool ok_to_move_valve = false;
   ok_to_move_valve |= operating_mode == m_spa_hex_valve;  // Allow movement in diag mode for this valve
-  ok_to_move_valve |= !motion;         // Also allow it if we are not opening or closing
-  ok_to_move_valve &= quad_lv_relay1 != 0;          // But disallow it if we have no relay1 board to operate on
+  ok_to_move_valve |= !motion;                            // Also allow it if we are not opening or closing
+  ok_to_move_valve &= quad_lv_relay1 != (void *)0;        // But disallow it if we have no relay1 board to operate on
   
   if (ok_to_move_valve) {
     if (valve_verbose) {
@@ -987,7 +1094,6 @@ void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
     spa_heat_ex_status_closed = false;
   } else {
     Serial.println(F("# alert error in open_spa_heat_exchanger_valve() "));
-    
     valve_error = true;
   }
 }
@@ -1007,20 +1113,19 @@ void monitor_valve_motion_callback(void)
     valve_timeout = true;
   }
 
-  bool valve_motion_finished;
-
-  if (quad_lv_relay1->getState(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN)) {
-    // We are attempting to open the spa valve.  If the valve status says it is open,
-    // then we consider the valve motion finished and we can turn off the valve-open power
-    valve_motion_finished = spa_heat_ex_valve_status_open();
-  } else {
-    // We are attempting to close the spa valve.  If the valve status stays it is closed,
-    // then we consider the valve motion finish and we can turn off the valve-close power.
-    valve_motion_finished = spa_heat_ex_valve_status_closed();
-  }
-
-  if (valve_motion_finished || valve_timeout) {
-    if (quad_lv_relay1 != 0) {
+  if (quad_lv_relay1 != (void *)0) {
+    bool valve_motion_finished;
+    if (quad_lv_relay1->getState(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN)) {
+      // We are attempting to open the spa valve.  If the valve status says it is open,
+      // then we consider the valve motion finished and we can turn off the valve-open power
+      valve_motion_finished = spa_heat_ex_valve_status_open();
+    } else {
+      // We are attempting to close the spa valve.  If the valve status stays it is closed,
+      // then we consider the valve motion finish and we can turn off the valve-close power.
+      valve_motion_finished = spa_heat_ex_valve_status_closed();
+    }
+  
+    if (valve_motion_finished || valve_timeout) {
       quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
       quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
     } else {
@@ -1046,7 +1151,7 @@ void close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
 {
   bool valve_not_in_motion = !monitor_valve_motion.isEnabled();
 
-  if (valve_not_in_motion && quad_lv_relay1 != 0) {
+  if (valve_not_in_motion && quad_lv_relay1 != (void *)0) {
     if (valve_verbose) {
       Serial.print(F("# alert closing valve: "));
       Serial.println(caller);
@@ -1485,92 +1590,6 @@ void monitor_recirc_pump_callback(void)
   }
 }
 
-bool takagi_on()
-{
-  return digitalRead(SSR_TAKAGI_PIN) == LOW;
-}
-
-void turn_roof_valves_to_tank_mode(const __FlashStringHelper *message)
-{
-  Serial.print(message);
-  if (quad_lv_relay2 != (void *)0) {
-    turn_roof_valves_power_on();
-    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
-    quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_POOL);
-  }
-  if (roof_valves_set_to_pool_mode()) {
-    record_error(F("turn_roof_valves_to_tank_mode()"));
-  }
-}
-
-void turn_roof_valves_to_pool_mode(const __FlashStringHelper *message)
-{
-  Serial.print(message);
-  if (quad_lv_relay2 != (void *)0) {
-    turn_roof_valves_power_on();
-    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
-    quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_POOL);
-  }
-  if (roof_valves_set_to_tank_mode()) {
-    record_error(F("turn_roof_valves_to_pool_mode()"));
-  }
-}
-
-void turn_roof_valves_power_on(void)
-{
-  roof_valves_motion_start_time = millis();
-  quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_POWER);
-}
-
-void turn_roof_valves_power_off(void)
-{
-  quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_POWER);
-}
-// Returns true if the roof valves are powered
-
-bool roof_valves_power_is_on(void)
-{
-  return quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POWER);
-}
-
-// This returns true if the status input says that the roof valves are in
-// tank mode.
-bool roof_valves_status_in_tank_mode()
-{
-  return digitalRead(ROOF_VALVES_STATUS_PIN) == LOW;
-}
-
-// This returns true if our relays that control the roof valves are set to
-// turn the roof vavles to tank mode().  There can be a delay between when
-// this is true and roof_valves_status_in_tank_mode() becomes true as it
-// takes a few seconds for the diverter valve to turn.
-bool roof_valves_set_to_tank_mode()
-{
-  bool r1 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_THERMAL_MASS) == LOW;
-  bool r2 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POOL) == LOW;
-  if (r1 != r2) {
-    static unsigned char alert_spew;
-    if (alert_spew < 20) {
-      Serial.println(F("# alert roof_valves_set_to_tank_mode() mismatch"));
-      alert_spew++;
-    }
-  }
-  return r1;
-}
-
-bool roof_valves_set_to_pool_mode(void)
-{
-  return !roof_valves_set_to_tank_mode();
-}
-
-const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
-
-// Returns true when today is a day we might heat the pool
-bool pool_heating_season(void)
-{
-  int m = month(arduino_time);
-  return (m >= 5 && m <= 9);
-}
 
 void monitor_roof_valves_callback()
 {
@@ -2033,7 +2052,11 @@ void setup(void)
 
   Serial.begin(SERIAL_BAUD);
   UCSR0A = UCSR0A | (1 << TXC0); //Clear Transmit Complete Flag
-  Serial.println(F("# alert reboot"));              // Put the first line we print on a fresh line (i.e., left column of output)
+  Serial.print(F("# alert reboot solarthermal "));              // Put the first line we print on a fresh line (i.e., left column of output)
+  Serial.print(F(__DATE__));
+  Serial.print(F(" "));
+  Serial.println(F(__TIME__));
+  
   setup_i2c_bus(); // This sets "quad_lv_relay1"
 
   if (pool_heat_request_relay_on() && roof_valves_set_to_tank_mode()) {
