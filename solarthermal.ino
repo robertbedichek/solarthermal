@@ -751,7 +751,7 @@ void monitor_solar_pump_callback(void)
             // the termal mass 
             pool_heating_inop = true;
             turn_pool_heat_request_relay_off(F("# heating pool water failed"));      
-            turn_roof_valves_to_tank_mode(F("# go back to heating the tank"));
+            turn_roof_valves_to_tank_mode(F("# go back to heating the tank\n"));
             if (spew_counter < 20) {
               Serial.println(F("# alert panel overtemp with pool request"));
               spew_counter++;
@@ -1492,7 +1492,7 @@ bool takagi_on()
 
 void turn_roof_valves_to_tank_mode(const __FlashStringHelper *message)
 {
-  Serial.println(message);
+  Serial.print(message);
   if (quad_lv_relay2 != (void *)0) {
     turn_roof_valves_power_on();
     quad_lv_relay2->turnRelayOff(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
@@ -1503,8 +1503,9 @@ void turn_roof_valves_to_tank_mode(const __FlashStringHelper *message)
   }
 }
 
-void turn_roof_valves_to_pool_mode(const __FlashStringHelper *caller)
+void turn_roof_valves_to_pool_mode(const __FlashStringHelper *message)
 {
+  Serial.print(message);
   if (quad_lv_relay2 != (void *)0) {
     turn_roof_valves_power_on();
     quad_lv_relay2->turnRelayOn(LV_RELAY2_ROOF_VALVES_THERMAL_MASS);
@@ -1590,8 +1591,13 @@ void monitor_roof_valves_callback()
     // valves to pool mode.
 
     if (roof_valves_set_to_tank_mode()) {
+      // Turn the roof valves to pool mode if it has been at least two minutes since
+      // we last turned the solar pump off and at least five minutes since the last
+      // time we turned the roof valves.
       if ((millis() - solar_pump_on_off_time) > 2 * 60 * 1000UL) {
-        turn_roof_valves_to_pool_mode(F("# turning roof valves to pool"));
+        if ((millis() - roof_valves_motion_start_time) > 5 * 60 * 1000UL) {
+          turn_roof_valves_to_pool_mode(F("# turning roof valves to pool\n"));
+        } 
       }
     }
   
@@ -1616,10 +1622,13 @@ void monitor_roof_valves_callback()
    // Turn off pool-heat request if the the panels are too cold to be effective
    // for even heating the pool
   if (pool_heat_request_relay_on()) {
-    if (average_panel_temperature_F < 90.0) {
-      turn_pool_heat_request_relay_off(F("# pool heat request off: low panel temperature\n"));
-    } else if (!pool_heating_season()) {
-      turn_pool_heat_request_relay_off(F("# pool heat request off: not pool heating season"));
+    // Defensive programming: ensure that we don't toggle the pool heat request relay too often
+    if ((millis() - pool_heat_request_relay_on_off_time) > 20 * 60 * 1000UL) {
+      if (average_panel_temperature_F < 90.0) {
+        turn_pool_heat_request_relay_off(F("# pool heat request off: low panel temperature\n"));
+      } else if (!pool_heating_season()) {
+        turn_pool_heat_request_relay_off(F("# pool heat request off: not pool heating season"));
+      }
     }
   } else {
   // If the roof valves are set to to pool-heat mode, but we are no longer asking for 
@@ -1629,9 +1638,20 @@ void monitor_roof_valves_callback()
 
     if (roof_valves_set_to_pool_mode() &&
         (millis() - pool_heat_request_relay_on_off_time) > (20 * 60 * 1000UL)) {
-      turn_roof_valves_to_tank_mode(F("# roof valves to tank mode after drain-down"));
+          // Give time for the pool heat request relay (after we have turned the
+          // roof valves to pool mode) to turn on.  Once that happens, we won't 
+          // infer from the roof valve position that we have stopped wanting to solar-heat
+          // the pool and thus, incorrectly, turn the roof valves back to tank mode.
+          // This is also defensive programming: ensure that whatever other bugs
+          // might be in the controller code, we don't swing the valve back and forther
+          // too frequently.
+      if ((millis() - roof_valves_motion_start_time) > 5 * 60 * 1000UL) {
+        turn_roof_valves_to_tank_mode(F("# roof valves to tank mode after drain-down\n"));
+      }
     }
   }
+  // If it has been 30 seconds since we last commanded the roof valves to change position, check to ensure
+  // that their position matches what the status indicator says.
   if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
     static unsigned spew_count;
     if (roof_valves_status_in_tank_mode() != roof_valves_set_to_tank_mode() && spew_count < 20) {
