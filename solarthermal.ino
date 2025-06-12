@@ -1822,7 +1822,8 @@ void setup_temperature_sensors()
   // Give approximate initial values to the tank temperature.  Otherwise on startup, it
   // can cause the Takagi and Spa electric heat enable to come on for a few minutes.  No
   // harm in that, but can be slightly confusing.  We only do this for the tank temperature
-  // to save program space.
+  // to save program space.  Also do this for spa so that the graphs don't have a dip
+  // every time the controller reboots.
 
   const bool need_for_seed = true;
   if (need_for_seed) {
@@ -1830,6 +1831,11 @@ void setup_temperature_sensors()
     float voltage = (float)adc_value * (5.0 / 1023.0);
     float temp_C = (voltage - 0.5) * 100.0; /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C */
     temps[tank_e].temperature_F += temp_C * (90.0 / 50.0) + 32.0 + temps[tank_e].calibration_offset_F;
+
+    adc_value = analogRead(temps[spa_e].input_pin);
+    voltage = (float)adc_value * (5.0 / 1023.0);
+    temp_C = (voltage - 0.5) * 100.0; /* LM36 gives voltage of 0.5 for 0C and 10mv per degree C */
+    temps[spa_e].temperature_F += temp_C * (90.0 / 50.0) + 32.0 + temps[spa_e].calibration_offset_F;
   }
 }
 void setup_lcd(void)
