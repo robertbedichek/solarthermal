@@ -29,7 +29,7 @@ RTC_DS3231 rtc;
 #define RTC_I2C_ADDR (0x68)
 const bool force_RTC_reload_from_build_time = false;
 const bool verbose_rtc = false; // Adds 70 bytes to RAM demand if true
-const bool verbose_I2C = false;
+const bool verbose_I2C = true;
 /*
  * We have two Sparkfun relay boards and possibly other 1-wire devices
  */
@@ -51,8 +51,11 @@ const bool verbose_I2C = false;
 #define LV_RELAY1_I2C_ADDR  (0x6D)                 // Default I2C address of the primary mechanical, low voltage, 4-relay board
 #define LV_RELAY2_I2C_ADDR  (0x6C)                 // I2C address of the 4-relay board that controls the roof valves
 
+#define SSR_RELAY_I2C_ADDR  (0x08)
+
 Qwiic_Relay *quad_lv_relay1;
 Qwiic_Relay *quad_lv_relay2;
+Qwiic_Relay *quad_ssr_relay;
 
 #include <SerLCD.h>
 SerLCD *lcd;
@@ -1425,7 +1428,7 @@ void monitor_serial_console_callback(void)
     if (received_char == '\n') {
       Serial.print(F("# Received line: "));
       Serial.println(received_command_buf);
-      
+        
       switch (received_command_buf[0]) {
         case 'd': // Set date command, "d year-month-day", e.g., "t 2025-05-23" to set the date
         {
@@ -1905,6 +1908,14 @@ void setup_i2c_bus(void)
              Serial.print(F("# Fail: r2"));
            }
            break;
+
+        case SSR_RELAY_I2C_ADDR :
+          Serial.print(F("# alert Quad SSR Qwiic Relay found!"));
+          quad_ssr_relay = new Qwiic_Relay(address);
+          if (quad_ssr_relay->begin() == 0) {
+            Serial.print(F("#  Fail: SSR"));
+          }
+          break;
 
         case RTC_I2C_ADDR:
           if (verbose_I2C) {            
