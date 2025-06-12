@@ -175,7 +175,7 @@ unsigned long roof_valves_motion_start_time; // Value of millis() the last time 
 
 typedef enum {m_oper, m_safe, m_poolheat, m_roof_valves, m_rpump, m_spump, m_takagi, m_spa_hex_valve, m_spa_elec, m_last} operating_mode_t;
 
-void monitor_valve_motion_callback(void);
+void monitor_spa_valve_motion_callback(void);
 void read_time_and_sensor_inputs_callback(void);
 void print_status_to_serial_callback(void);
 void poll_keys_callback(void);
@@ -268,7 +268,7 @@ unsigned daily_valve_cycles;        // Number of valve-open operations per day
 bool spa_heat_ex_valve_status_closed(void);
 bool spa_heat_ex_valve_status_open(void);
 
-Task monitor_valve_motion(200, TASK_FOREVER, &monitor_valve_motion_callback, &ts, false);
+Task monitor_spa_valve_motion(200, TASK_FOREVER, &monitor_spa_valve_motion_callback, &ts, false);
 Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callback, &ts, true);
 Task monitor_roof_valves(TASK_SECOND, TASK_FOREVER, &monitor_roof_valves_callback, &ts, true);
 
@@ -1077,7 +1077,7 @@ void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
   if (message != (void *)0) {
     Serial.println(message);
   }
-  bool motion =  monitor_valve_motion.isEnabled();
+  bool motion =  monitor_spa_valve_motion.isEnabled();
   bool ok_to_move_valve = false;
   ok_to_move_valve |= operating_mode == m_spa_hex_valve;  // Allow movement in diag mode for this valve
   ok_to_move_valve |= !motion;                            // Also allow it if we are not opening or closing
@@ -1091,7 +1091,7 @@ void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
     quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
     valve_motion_start_time = millis();
     valve_timeout = false;
-    monitor_valve_motion.enable();
+    monitor_spa_valve_motion.enable();
     daily_valve_cycles++;
     last_valve_open_time = millis();
     spa_heat_ex_status_closed = false;
@@ -1106,13 +1106,13 @@ void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
 // power and disables itself. If 15 seconds elpases without this signal, it also stops
 // the valve power and disables itself (and signals an valve motion error).
 
-void monitor_valve_motion_callback(void)
+void monitor_spa_valve_motion_callback(void)
 {
-  check_free_memory(F("monitor_valve"));
+  check_free_memory(F("monitor_spa_valve"));
   if ((millis() - valve_motion_start_time) > 15000) {
     // We turn off the valve-opening process once the valve signal says it is open or
     // after 15 seconds, as it should just take 13 seconds
-    Serial.println(F("# alert valve timeout"));
+    Serial.println(F("# alert: spa valve timeout"));
     valve_timeout = true;
   }
 
@@ -1122,10 +1122,12 @@ void monitor_valve_motion_callback(void)
       // We are attempting to open the spa valve.  If the valve status says it is open,
       // then we consider the valve motion finished and we can turn off the valve-open power
       valve_motion_finished = spa_heat_ex_valve_status_open();
+      spa_heat_ex_status_open = true; // Backup flag in case status circuit fails
     } else {
       // We are attempting to close the spa valve.  If the valve status stays it is closed,
       // then we consider the valve motion finish and we can turn off the valve-close power.
       valve_motion_finished = spa_heat_ex_valve_status_closed();
+      spa_heat_ex_status_closed = true; // Backup flag in case status circuit fails
     }
   
     if (valve_motion_finished || valve_timeout) {
@@ -1134,16 +1136,16 @@ void monitor_valve_motion_callback(void)
     } else {
       // We should never get here, if the relay is gone, we should not have
       // enabled this task.
-      record_error(F("# monitor_valve_motion_callback()"));
+      record_error(F("# monitor_spa_valve_motion_callback()"));
     }
-    monitor_valve_motion.disable();
+    monitor_spa_valve_motion.disable();
     valve_motion_start_time = 0;    
     if (valve_timeout == false) {
       valve_error = false;         // Reset error flag on successful opening of valve
     } else {
       valve_status_failed = true;   // Assume the problem is with the status circuit and not the valve itself
     }
-    spa_heat_ex_status_open = true; // Backup flag in case status circuit fails
+    
   }
 }
    
@@ -1152,7 +1154,7 @@ void monitor_valve_motion_callback(void)
 
 void close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
 {
-  bool valve_not_in_motion = !monitor_valve_motion.isEnabled();
+  bool valve_not_in_motion = !monitor_spa_valve_motion.isEnabled();
 
   if (valve_not_in_motion && quad_lv_relay1 != (void *)0) {
     if (valve_verbose) {
@@ -1163,8 +1165,8 @@ void close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
     quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
     valve_motion_start_time = millis();
     valve_timeout = false;
-    monitor_valve_motion.enable();
-    valve_not_in_motion = !monitor_valve_motion.isEnabled();
+    monitor_spa_valve_motion.enable();
+    valve_not_in_motion = !monitor_spa_valve_motion.isEnabled();
     if (valve_not_in_motion) {
       Serial.println(F("# alert valve_not_in_motion is true unexpectly"));
     }
@@ -1186,10 +1188,10 @@ void monitor_spa_valve_callback(void)
   check_free_memory(F("monitor_spa_valve.."));
   // The status from the valve is inconsistent, maybe it got stuck between opening and closing
   // when a reboot happened.  This should be extremely rare.
-  bool valve_not_in_motion = monitor_valve_motion.isEnabled() == false;
+  bool spa_valve_not_in_motion = monitor_spa_valve_motion.isEnabled() == false;
   if (operating_mode != m_spa_hex_valve) {
     if (spa_heat_ex_valve_status_open() == false && spa_heat_ex_valve_status_closed() == false &&
-        valve_not_in_motion &&
+        spa_valve_not_in_motion &&
         valve_status_failed == false) {
           // Try to rectify the situation by asking for the valve to close.
       Serial.println(F("# alert valve status neither open nor closed, attempting to close"));
@@ -1216,10 +1218,10 @@ void monitor_spa_valve_callback(void)
       if (spa_calling_for_heat()) {
         if (temps[tank_e].temperature_F >= 113 &&
             spa_heat_ex_valve_status_open() == false &&
-            valve_not_in_motion && operating_mode == m_oper) {
+            spa_valve_not_in_motion && operating_mode == m_oper) {
           open_spa_heat_exchanger_valve((void *)0);
         } else if (spa_heat_ex_valve_status_closed() == false && (temps[tank_e].temperature_F <= 110) &&
-            valve_not_in_motion) {
+            spa_valve_not_in_motion) {
   
           // Close the valve if the tank is too cool to be effective at heating the spa even though
           // the spa is calling for heat.
@@ -1232,7 +1234,7 @@ void monitor_spa_valve_callback(void)
         // 2. the spa valve is open (or, at least, not closed
         // 3. the valve is not in motion
   
-        if (spa_heat_ex_valve_status_closed() == false && valve_not_in_motion) {
+        if (spa_heat_ex_valve_status_closed() == false && spa_valve_not_in_motion) {
           close_spa_heat_exchanger_valve(F("no call for heat"));
         }
       }
@@ -1240,7 +1242,7 @@ void monitor_spa_valve_callback(void)
       // If the tank temperature isn't valid, play it safe by making sure the spa valve is closed.
       // The code that controls the spa's electric heater will turn it on in this case.
       if (spa_heat_ex_valve_status_closed() == false &&
-          valve_not_in_motion) {
+          spa_valve_not_in_motion) {
         close_spa_heat_exchanger_valve(F("tank temperature not valid"));
       }
     }
