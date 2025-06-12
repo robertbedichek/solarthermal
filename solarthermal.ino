@@ -1116,25 +1116,26 @@ void monitor_spa_valve_motion_callback(void)
     valve_timeout = true;
   }
 
-  if (quad_lv_relay1 != (void *)0) {
-    bool valve_motion_finished;
-    if (quad_lv_relay1->getState(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN)) {
-      // We are attempting to open the spa valve.  If the valve status says it is open,
-      // then we consider the valve motion finished and we can turn off the valve-open power
-      valve_motion_finished = spa_heat_ex_valve_status_open();
-      spa_heat_ex_status_open = true; // Backup flag in case status circuit fails
-    } else {
-      // We are attempting to close the spa valve.  If the valve status stays it is closed,
-      // then we consider the valve motion finish and we can turn off the valve-close power.
-      valve_motion_finished = spa_heat_ex_valve_status_closed();
-      spa_heat_ex_status_closed = true; // Backup flag in case status circuit fails
-    }
-  
-    if (valve_motion_finished || valve_timeout) {
+  bool valve_motion_finished;
+  if (quad_lv_relay1->getState(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN)) {
+    // We are attempting to open the spa valve.  If the valve status says it is open,
+    // then we consider the valve motion finished and we can turn off the valve-open power
+    valve_motion_finished = spa_heat_ex_valve_status_open();
+    spa_heat_ex_status_open = true; // Backup flag in case status circuit fails
+  } else {
+    // We are attempting to close the spa valve.  If the valve status stays it is closed,
+    // then we consider the valve motion finish and we can turn off the valve-close power.
+    valve_motion_finished = spa_heat_ex_valve_status_closed();
+    spa_heat_ex_status_closed = true; // Backup flag in case status circuit fails
+  }
+
+  if (valve_motion_finished || valve_timeout) {
+    if (quad_lv_relay1 != (void *)0) {
       quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
       quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_CLOSE);
     } else {
-      // We should never get here, if the relay is gone, we should not have
+      // We should never get here, if quad_lv_relay1 is null (e.g., because
+      // we are bench testing without a relay board), we should not have
       // enabled this task.
       record_error(F("# monitor_spa_valve_motion_callback()"));
     }
@@ -1145,7 +1146,6 @@ void monitor_spa_valve_motion_callback(void)
     } else {
       valve_status_failed = true;   // Assume the problem is with the status circuit and not the valve itself
     }
-    
   }
 }
    
