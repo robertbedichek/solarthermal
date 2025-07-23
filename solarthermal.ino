@@ -581,7 +581,8 @@ void read_time_and_sensor_inputs_callback(void)
 
   if (temps[left_panel_e].temperature_valid) {
     if (temps[right_panel_e].temperature_valid) {
-      average_panel_temperature_F = (temps[left_panel_e].temperature_F + temps[right_panel_e].temperature_F) / 2.0;
+//      average_panel_temperature_F = (temps[left_panel_e].temperature_F + temps[right_panel_e].temperature_F) / 2.0;
+      average_panel_temperature_F = max(temps[left_panel_e].temperature_F, temps[right_panel_e].temperature_F);
     } else {
       average_panel_temperature_F = temps[left_panel_e].temperature_F;
       static bool first_time = true;
@@ -880,7 +881,11 @@ void monitor_solar_pump_callback(void)
         if (temps[tank_e].temperature_F > 170) {
           turn_solar_pump_off(F("# alert tank too hot, turning off solar pump"));
         } else if (average_panel_temperature_F < (temps[tank_e].temperature_F + tank_panel_difference_threshold_off_F)) {
-          turn_solar_pump_off(F("# panels too cold, turn off solar pump"));
+          // Only allow the pump to shut off for low temperature if we turned it on more than 45 minutes ago.  This
+          // is to prevent cycling on and off too frequently due to temperature shifts.
+          if ((millis() - solar_pump_on_off_time) > 45 * 60 * 1000UL) {
+            turn_solar_pump_off(F("# panels too cold, turn off solar pump"));
+          }
         } else if (h >= 20) {
           turn_solar_pump_off(F("# alert solar pump still on at 8PM"));
         } else if (pool_heating_season() && !pool_heating_inop && temps[tank_e].temperature_F > 140) {
@@ -1573,28 +1578,29 @@ void monitor_recirc_pump_callback(void)
 // Turn the recirc pump on at the top of the hour and at the half hour for two minutes.  However, if the
 // the Takagi is on, restrict the operating time to 8AM to 11PM
 
-  if ((h >= 8 && h <= 23) || takagi_on() == false) {
-    switch (m) {
-      case 0: 
-      case 30:
-        if (recirc_pump_on() == false) {
+  if (!recirc_pump_on()) {
+    if ((h >= 8 && h <= 23) || !takagi_on()) {
+      switch (m) {
+        case 0: 
+        case 30:
           turn_recirc_pump_on((void *)0);
-        }
-        break;
+          break;
+      }
+    }
+  } else {
 
+  // We turn off the takagi regardless of the hour or whether the Takagi is on.  This is because
+  // the Takagi state could have changed since we turned on the recirc pump.  We want to avoid 
+  // the situation where the recirc pump is not turned off when it should.
+
+    switch (m) {
       case 2:
       case 32:
-        if (recirc_pump_on() == true) {
           turn_recirc_pump_off((void *)0);
-        }
-        break;
-
-      default:
         break;
     }
   }
 }
-
 
 void monitor_roof_valves_callback()
 {
