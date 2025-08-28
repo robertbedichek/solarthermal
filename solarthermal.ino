@@ -989,25 +989,24 @@ void monitor_spa_electric_heat_callback(void)
         // If the tank is warm enough to heat the spa and we haven't turned the
         // relay on within the hour or if the spa is not calling for heat, 
         // disable electric spa heat
-        unsigned long seconds_spa_heater_relay_on = (millis() - spa_heater_relay_on_time) / 1000;
-        if (temps[tank_e].temperature_F >= 115 && 
-            (seconds_spa_heater_relay_on > 3600) || !spa_calling_for_heat()) {
+        unsigned long milliseconds_spa_heater_relay_on = millis() - spa_heater_relay_on_time;
+        if (temps[tank_e].temperature_F >= 120 && (milliseconds_spa_heater_relay_on > (3600 * 1000UL))) {
           turn_spa_heater_relay_off((void *)0);
         }
       } else {
         
-        unsigned seconds_valve_open = (millis() - last_valve_open_time) / 1000UL;
+        unsigned long milliseconds_valve_open = millis() - last_valve_open_time;
         // If the tank is too cool or if the spa valve has been open for more than 30 minutes, enable the spa's electric heater
         // for at least an hour
         unsigned h = hour(arduino_time);
         // Be more patient heating the spa with solar during hours when it is unlikely anyone will 
         // be using the spa
-        unsigned seconds_limit = (1 <= h && h <= 6) ? 5400 : 2700;  // 45 minutes daytime, 1.5 hours in the middle of the night.
+        unsigned long minutes_limit = (1 <= h && h <= 6) ? 120 : 90;  // 90 minutes daytime, 2u hours in the middle of the night.
         if (temps[tank_e].temperature_F <= (spa_heat_ex_valve_open() ? 110 : 113) ||
-           (spa_heat_ex_valve_open() && (seconds_valve_open > seconds_limit))) {
+           (spa_heat_ex_valve_open() && (milliseconds_valve_open > (minutes_limit * 60 * 1000UL)))) {
             if (valve_verbose) {
               snprintf(cbuf, sizeof(cbuf), "# spaH=%d valve_open=%d time=%u",
-                spa_heater_relay_on(), spa_heat_ex_valve_open(), seconds_valve_open);
+                spa_heater_relay_on(), spa_heat_ex_valve_open(), (unsigned)(milliseconds_valve_open / 1000UL));
               Serial.println(cbuf);
            }
           turn_spa_heater_relay_on((void *)0);
@@ -1015,9 +1014,9 @@ void monitor_spa_electric_heat_callback(void)
       }
     }
   } else {
-    if (spa_heater_relay_on() == false) {
+    if (!spa_heater_relay_on()) {
       // If the tank temperature is not valid, play it safe and turn on the electric heater
-      turn_spa_heater_relay_on(F("# tank temp invalid, spa heater on, t="));
+      turn_spa_heater_relay_on(F("# alert tank temp invalid, spa heater on, t="));
       Serial.print((int)temps[tank_e].temperature_F);
     }
   }
