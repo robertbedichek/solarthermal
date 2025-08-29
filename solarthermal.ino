@@ -1038,12 +1038,17 @@ bool spa_heat_ex_valve_open(void)
 // This intiates the valve opening process by applying the correct polarity of power to the valve motor
 // and by enabling the task that monitors the opening process.
 
+unsigned long delayed_close_spa_heat_exchanger_valve_time;
+const __FlashStringHelper *delayed_caller;
+
 void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
 {
   if (message != (void *)0) {
     Serial.println(message);
   }
   quad_lv_relay1->turnRelayOn(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
+  delayed_close_spa_heat_exchanger_valve_time = 0UL;
+  last_valve_open_time = millis();
 }
 
 
@@ -1053,7 +1058,18 @@ void open_spa_heat_exchanger_valve(const __FlashStringHelper *message)
 void close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
 {
   quad_lv_relay1->turnRelayOff(LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN);
+  delayed_close_spa_heat_exchanger_valve_time = 0ULL;
 }
+
+
+// This will cause the valve to close at some point in the future (like in 5 minutes)
+
+void delayed_close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
+{
+  delayed_caller = caller;
+  delayed_close_spa_heat_exchanger_valve_time = millis();
+}
+
 
 // This is called every ten seconds and decides whether to open the valve allowing the spa
 // to be heated with solar, to close the valve, or to leave it alone.
@@ -1065,7 +1081,11 @@ void monitor_spa_valve_callback(void)
   check_free_memory(F("monitor_spa_valve.."));
   
   if (operating_mode != m_spa_hex_valve) {
-    
+    if (delayed_close_spa_heat_exchanger_valve_time != 0) {
+      if ((millis - delayed_close_spa_heat_exchanger_valve_time) > (5 * 60 * 1000UL)) {
+        close_spa_heat_exchanger_valve(delayed_caller);
+      }
+    }
     if (temps[tank_e].temperature_valid) {
   
       // If the following are true, open the spa valve so that the spa water is warmed from solar
@@ -1084,7 +1104,7 @@ void monitor_spa_valve_callback(void)
   
           // Close the valve if the tank is too cool to be effective at heating the spa even though
           // the spa is calling for heat.
-          close_spa_heat_exchanger_valve(F("low tank temperature"));
+          delayed_close_spa_heat_exchanger_valve(F("low tank temperature"));
         }
       } else {
   
@@ -1094,7 +1114,7 @@ void monitor_spa_valve_callback(void)
         // 3. the valve is not in motion
   
         if (spa_heat_ex_valve_open()) {
-          close_spa_heat_exchanger_valve(F("no call for heat"));
+          delayed_close_spa_heat_exchanger_valve(F("no call for heat"));
         }
       }
     } else {
