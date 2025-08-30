@@ -1066,8 +1066,10 @@ void close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
 
 void delayed_close_spa_heat_exchanger_valve(const __FlashStringHelper *caller)
 {
-  delayed_caller = caller;
-  delayed_close_spa_heat_exchanger_valve_time = millis();
+  if (delayed_close_spa_heat_exchanger_valve_time == 0UL) {
+    delayed_caller = caller;
+    delayed_close_spa_heat_exchanger_valve_time = millis();
+  }
 }
 
 
@@ -1082,7 +1084,7 @@ void monitor_spa_valve_callback(void)
   
   if (operating_mode != m_spa_hex_valve) {
     if (delayed_close_spa_heat_exchanger_valve_time != 0) {
-      if ((millis - delayed_close_spa_heat_exchanger_valve_time) > (5 * 60 * 1000UL)) {
+      if ((millis() - delayed_close_spa_heat_exchanger_valve_time) > (5 * 60 * 1000UL)) {
         close_spa_heat_exchanger_valve(delayed_caller);
       }
     }
