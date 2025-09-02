@@ -26,7 +26,7 @@ SSH_COMMAND = [
     "/usr/bin/env", "ssh",
     "-i", os.path.expanduser('~/.ssh/id_rsa'),
     "root@bedichek.org",
-    "cat >> /var/www/home/solarthermal.txt"
+    "cat >> /var/www/html/home/solarthermal.txt"
 ]
 
 port = "/dev/tty.usbserial-11240"   # Replace with your actual port
