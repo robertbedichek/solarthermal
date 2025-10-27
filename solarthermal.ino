@@ -1489,6 +1489,8 @@ void monitor_recirc_pump_callback(void)
 
 void monitor_roof_valves_callback()
 {
+
+  // Turn off the roof valve power if it has been awhile since the last time we caused them to change position.
   if (roof_valves_power_is_on() && (millis() - roof_valves_motion_start_time) > max_roof_valves_power_on_time) {
     turn_roof_valves_power_off();
   }
@@ -1498,13 +1500,13 @@ void monitor_roof_valves_callback()
   // have not given up on heating the pool (i.e., we haven't marked it "INOP"), and the panels
   // are hot enough for it to be worthwhile, then
   // first turn the roof valves to pool mode once the solar pump has been off for two minutes
-  // and then turn the pool-heat-request-relay on at least 20 seconds after we have started
-  // the roof valves in motion.
+  // (to give the panels time to drain) and then turn the pool-heat-request-relay on at 
+  // least 20 seconds after we have started the roof valves in motion.
 
   if (!solar_pump_on() && !pool_heat_request_relay_on() && pool_heating_season() &&
       temps[tank_e].temperature_valid && temps[tank_e].temperature_F >= 140 &&
       average_panel_temperature_F > 120) {
-    // If we have given the tank water to drain back to the tank, then turn the roof
+    // If we have given the tank water time to drain back to the tank, then turn the roof
     // valves to pool mode.
 
     if (roof_valves_set_to_tank_mode()) {
@@ -1512,6 +1514,8 @@ void monitor_roof_valves_callback()
       // we last turned the solar pump off and at least five minutes since the last
       // time we turned the roof valves.
       if ((millis() - solar_pump_on_off_time) > 2 * 60 * 1000UL) {
+        // This is defensive programming, in case of logic bugs elsewhere, don't change
+        // the roof valve position too often:
         if ((millis() - roof_valves_motion_start_time) > 5 * 60 * 1000UL) {
           turn_roof_valves_to_pool_mode(F("# turning roof valves to pool\n"));
         } 
@@ -1550,11 +1554,15 @@ void monitor_roof_valves_callback()
   } else {
   // If the roof valves are set to to pool-heat mode, but we are no longer asking for 
   // the pool pump controller to send pool water to the roof, and
-  // it has been twenty minutes since we de-asserted the pool heat request, assume
+  // it has been four minutes since we de-asserted the pool heat request, assume
   // the panels have drained of pool water and turn the roof valves back to tank mode
+  // The poolpumpcontrol will not activate the main pump for five minutes after deasserting
+  // of the pool heat request, to ensure that it does not send water to the panels during
+  // the four minute drain-down period.  This extra minute is to cover valve-transition times,
+  // delays in recognizing signals, etc.
 
     if (roof_valves_set_to_pool_mode() &&
-        (millis() - pool_heat_request_relay_on_off_time) > (20 * 60 * 1000UL)) {
+        (millis() - pool_heat_request_relay_on_off_time) > (4 * 60 * 1000UL)) {
           // Give time for the pool heat request relay (after we have turned the
           // roof valves to pool mode) to turn on.  Once that happens, we won't 
           // infer from the roof valve position that we have stopped wanting to solar-heat
