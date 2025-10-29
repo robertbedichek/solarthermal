@@ -203,7 +203,10 @@ struct temperature_s {
   int upper_bound_F;
 } temps [last_temp_e];
 
-float ema_alpha = 1.0; // Smoothing factor (0 = slow response, 1 = no filtering)
+bool left_panel_sensor_failed;
+bool right_panel_sensor_failed;
+
+float ema_alpha = 0.2; // Smoothing factor (0 = slow response, 1 = no filtering)
 
 Task read_time_and_sensor_inputs(TASK_SECOND, TASK_FOREVER, &read_time_and_sensor_inputs_callback, &ts, true);
 /*****************************************************************************************************/
@@ -509,18 +512,28 @@ bool pool_heating_season(void)
 */
 void read_time_and_sensor_inputs_callback(void)
 {
+  static int oor_counter = 0;
   arduino_time = now();
 
-  // EMA -- exponential moving average filter, courtesy of ChatGPT 4o
-  if (ema_alpha > 0.03) {
-    ema_alpha -= 0.2;
-    if (ema_alpha < 0.03) {
-      ema_alpha = 0.03;
+  // At midnight, reset the sensor-failed flags.
+  if (hour(arduino_time) == 0 && minute(arduino_time) == 0) {
+    right_panel_sensor_failed = false;
+    left_panel_sensor_failed = false;
+  }
+  
+  if (oor_counter >= 10) {
+    // On average, if the oor_counter has gone to its maximum value, decrement it by one
+    // once every 4096 times this is called.  This depends on the bottom 12 bits millis()
+    // being random.
+    if ((millis() & 0xfff) == 0) {
+      oor_counter--;
     }
   }
 
+  // We do two levels of temperature sample filtering.  First we take the arithmetic mean of 20 samples.
+  // Then we apply EMA (exponential moving average)
+
   const int samples = 20;
-  
   for (struct temperature_s *t = &temps[0] ; t < &temps[last_temp_e] ; t++) {
     float temp_F = 0.0;
     int adc_value;
@@ -536,24 +549,14 @@ void read_time_and_sensor_inputs_callback(void)
     }
     temp_F /= samples;
 
-    if (t == &temps[spa_e]) {
-      // Hack for spa temperature probe, which is not perfectly in the stream of spa water,
-      // but is affected by outside temperature.  When the panels are 34F, the spa temp is correctly
-      // set with the calibration_offset_F value we set in setup().  When the panels are 169, that's when
-      // it is warm outside and the spa sensor reads 6F higher than actual.
-      int correction_F = ((average_panel_temperature_F - 34.0) / 135.0) * 6.0;
-      temp_F -= correction_F;
-    }
- 
     // If the temperature is valid, then let this sample's voltage be averaged with
     // previous samples.  If not, toss it out.
     if (temp_F >= t->lower_bound_F && temp_F <= t->upper_bound_F) {
       t->last_valid_time = millis();
     } else {
       char v_str[10], c_str[10], f_str[10];
-      static int oor_counter = 0;
-
-      if (oor_counter < 100) {
+      
+      if (oor_counter < 10) {
         dtostrf(voltage, 4, 3, v_str);
         dtostrf(temp_C, 4, 1, c_str);
         dtostrf(temp_F, 4, 1, f_str);
@@ -568,9 +571,12 @@ void read_time_and_sensor_inputs_callback(void)
         }
       }
     }
+
+     // EMA -- exponential moving average filter, courtesy of ChatGPT 4o
+
     t->temperature_F = ema_alpha * temp_F + (1 - ema_alpha) * t->temperature_F;
 
-    if ((millis() - t->last_valid_time) > 600000UL) {
+    if ((millis() - t->last_valid_time) > 10 * 60 * 1000UL) {
       // If it has been 10 minutes since the last valid sample, then flag this sensor as not valid
       t->temperature_valid = false;
     } else {
@@ -582,30 +588,26 @@ void read_time_and_sensor_inputs_callback(void)
 
   if (temps[left_panel_e].temperature_valid) {
     if (temps[right_panel_e].temperature_valid) {
-//      average_panel_temperature_F = (temps[left_panel_e].temperature_F + temps[right_panel_e].temperature_F) / 2.0;
-      average_panel_temperature_F = max(temps[left_panel_e].temperature_F, temps[right_panel_e].temperature_F);
+      average_panel_temperature_F = (temps[left_panel_e].temperature_F + temps[right_panel_e].temperature_F) / 2.0;
     } else {
       average_panel_temperature_F = temps[left_panel_e].temperature_F;
-      static bool first_time = true;
-      if (first_time) {
+      if (!right_panel_sensor_failed) {
         record_error(F("right panel sensor failed"));
-        first_time = false;
+        right_panel_sensor_failed = true;
       }
     }
   } else {
     if (temps[right_panel_e].temperature_valid) {
       average_panel_temperature_F = temps[right_panel_e].temperature_F;
-      static bool first_time = true;
-      if (first_time) {
+      if (!left_panel_sensor_failed) {
         record_error(F("left panel sensor failed"));
-        first_time = false;
+        left_panel_sensor_failed = true;
       }
     } else {
       // Both temperature sensors have failed, print error and leave panel_temperature_F as it was´
-      static bool first_time = true;
-      if (first_time) {
+      if (!right_panel_sensor_failed) {
         record_error(F("both panel sensors failed"));
-        first_time = false;
+        right_panel_sensor_failed = true;
       }
     }
   }
