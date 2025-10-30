@@ -202,8 +202,8 @@ struct temperature_s {
   int upper_bound_F;
 } temps [last_temp_e];
 
-bool left_panel_sensor_failed = false;
-bool right_panel_sensor_failed = true;  // As of Oct 29, 2025, the right panel sensor is unreliable
+bool left_panel_sensor_failed = true;  // TMP36 is flakey on the leftmost panel
+bool right_panel_sensor_failed = false;
 unsigned long first_high_temp_time;  // value of millis() when the average panel temperature was hot enough
 float peak_tank_temperature_F;
 unsigned long peak_tank_temperature_time;
@@ -443,7 +443,7 @@ bool roof_valves_set_to_pool_mode(void)
 // Return true if we have turned on the Arudino output pin that drives a relay
 // we added to the Spa.  This relay connect's the Spa's heater control signal
 // (a 12VDC signal) to the Spa's heater relay (which switches 230VAC).  This
-// output pin is "active low"
+// output pin is "active low".
 bool spa_calling_for_heat(void)
 {
   return digitalRead(SPA_HEAT_DIGITAL_IN_PIN) == LOW;
@@ -719,8 +719,7 @@ void process_pressed_keys_callback(void)
         break;
 
       case m_takagi:
-        turn_takagi_on(F("# Takagi=%d"));
-        Serial.println(takagi_on());
+        turn_takagi_on();
         break;
 
       case m_spa_hex_valve:    
@@ -1457,7 +1456,7 @@ bool recirc_pump_on(void)
   return digitalRead(SSR_RECIRC_PUMP_PIN) == LOW;
 }
 
-void turn_recirc_pump_on(void);
+void turn_recirc_pump_on(void)
 {
   digitalWrite(SSR_RECIRC_PUMP_PIN, LOW); // Ground the low side of the SSR, turning on recirculation pump
 }
@@ -1724,7 +1723,7 @@ void setup_temperature_sensors()
   temps[tank_e].lower_bound_F = 40;
   temps[tank_e].upper_bound_F = 190;
 
-  temps[left_panel_e].input_pin = A1;  // Leftmost solar panel temperature
+  temps[left_panel_e].input_pin = A3;  // Leftmost solar panel temperature
   temps[left_panel_e].calibration_offset_F = 3; 
   temps[left_panel_e].lower_bound_F = 10;
   temps[left_panel_e].upper_bound_F = 280;
@@ -1734,7 +1733,7 @@ void setup_temperature_sensors()
   temps[spa_e].lower_bound_F = 32;
   temps[spa_e].upper_bound_F = 120;
 
-  temps[right_panel_e].input_pin = A3;    // Rightmost solar panel temperature
+  temps[right_panel_e].input_pin = A1;    // Rightmost solar panel temperature
   temps[right_panel_e].calibration_offset_F = 2; 
   temps[right_panel_e].lower_bound_F = 10;
   temps[right_panel_e].upper_bound_F = 280;
