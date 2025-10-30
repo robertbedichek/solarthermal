@@ -313,7 +313,7 @@ unsigned long pool_heat_request_relay_on_off_time;
 const unsigned recirc_on_time_in_seconds = 90;
 bool recirc_pump_on();
 
-void turn_recirc_pump_on(const __FlashStringHelper *message);
+void turn_recirc_pump_on(void);
 void turn_recirc_pump_off(const __FlashStringHelper *message);
 
 Task monitor_recirc_pump(TASK_SECOND * 10, TASK_FOREVER, &monitor_recirc_pump_callback, &ts, true);
@@ -324,7 +324,7 @@ const int takagi_off_threshold_F = 125; // If the tank is this or above, turn th
 
 bool takagi_on(void);
 
-void turn_takagi_on(const __FlashStringHelper *message);
+void turn_takagi_on(void);
 void turn_takagi_off(const __FlashStringHelper *message);
 
 unsigned long daily_milliseconds_of_takagi_on_time;
@@ -440,11 +440,18 @@ bool roof_valves_set_to_pool_mode(void)
   return !roof_valves_set_to_tank_mode();
 }
 
+// Return true if we have turned on the Arudino output pin that drives a relay
+// we added to the Spa.  This relay connect's the Spa's heater control signal
+// (a 12VDC signal) to the Spa's heater relay (which switches 230VAC).  This
+// output pin is "active low"
 bool spa_calling_for_heat(void)
 {
   return digitalRead(SPA_HEAT_DIGITAL_IN_PIN) == LOW;
 }
 
+// Return true if we have turned on the Arduino output pin that drives the SSR
+// that controls the 120VAC sent to the outlet labeled "Takagi". This output pin
+// is "active low".
 bool takagi_on()
 {
   return digitalRead(SSR_TAKAGI_PIN) == LOW;
@@ -704,8 +711,7 @@ void process_pressed_keys_callback(void)
         break;
 
       case m_rpump:
-        turn_recirc_pump_on(F("# recirc pump="));
-        Serial.println(recirc_pump_on());
+        turn_recirc_pump_on();
         break;
 
       case m_spump:
@@ -1451,11 +1457,8 @@ bool recirc_pump_on(void)
   return digitalRead(SSR_RECIRC_PUMP_PIN) == LOW;
 }
 
-void turn_recirc_pump_on(const __FlashStringHelper *message) 
+void turn_recirc_pump_on(void);
 {
-  if (message != nullptr) {
-    Serial.println(message);
-  }
   digitalWrite(SSR_RECIRC_PUMP_PIN, LOW); // Ground the low side of the SSR, turning on recirculation pump
 }
 
@@ -1484,7 +1487,7 @@ void monitor_recirc_pump_callback(void)
       switch (m) {
         case 0: 
         case 30:
-          turn_recirc_pump_on(nullptr);
+          turn_recirc_pump_on();
           break;
       }
     }
@@ -1602,11 +1605,8 @@ void monitor_roof_valves_callback()
   }
 }
 
-void turn_takagi_on(const __FlashStringHelper *message)
+void turn_takagi_on(void)
 {
-  if (message != nullptr) {
-    Serial.println(message);
-  }
   takagi_on_time = millis();
   digitalWrite(SSR_TAKAGI_PIN, LOW); // Turn on Takagi flash heater
 }
@@ -1637,13 +1637,13 @@ void monitor_takagi_callback(void)
         turn_takagi_off(nullptr);
       } else if (takagi_on() == false && temps[tank_e].temperature_F <  takagi_on_threshold_F) {
         if (last_takagi_change == 0 || (millis() - last_takagi_change) > TAKAGI_DELAY) {
-          turn_takagi_on(nullptr);
+          turn_takagi_on();
           last_takagi_change = millis();
         }
       }
     } else {
       // If the tank temperature isn't valid, then just turn on the Takagi and leave it on
-      turn_takagi_on(nullptr);
+      turn_takagi_on();
     }
   }
 }
