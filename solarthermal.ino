@@ -202,7 +202,7 @@ struct temperature_s {
   int upper_bound_F;
 } temps [last_temp_e];
 
-bool left_panel_sensor_failed = true;  // TMP36 is flakey on the leftmost panel
+bool left_panel_sensor_failed = false;
 bool right_panel_sensor_failed = false;
 unsigned long first_high_temp_time;  // value of millis() when the average panel temperature was hot enough
 float peak_tank_temperature_F;
@@ -523,6 +523,8 @@ bool pool_heating_season(void)
 void read_time_and_sensor_inputs_callback(void)
 {
   static int oor_counter = 0;
+  static bool first_time = true; // Used to initialize the EMA filter, so that the first few temperature measurements
+                                 // are not so far off
   arduino_time = now();
 
   if (oor_counter >= 10) {
@@ -559,7 +561,11 @@ void read_time_and_sensor_inputs_callback(void)
       t->temperature_valid = true;
 
       // EMA -- exponential moving average filter, courtesy of ChatGPT 4o
-      t->temperature_F = ema_alpha * temp_F + (1 - ema_alpha) * t->temperature_F;
+      if (first_time) {
+        t->temperature_F = temp_F;
+      } else {
+        t->temperature_F = ema_alpha * temp_F + (1 - ema_alpha) * t->temperature_F;
+      }
     } else {
       t->temperature_valid = false;
       char v_str[10], c_str[10], f_str[10];
@@ -580,6 +586,7 @@ void read_time_and_sensor_inputs_callback(void)
       }
     }
   }
+  first_time = false;
 
   if (temps[left_panel_e].temperature_valid && !left_panel_sensor_failed) {
     if (temps[right_panel_e].temperature_valid && !right_panel_sensor_failed) {
@@ -868,12 +875,10 @@ void monitor_solar_pump_callback(void)
           // It has been five minutes since the average panel temperature reached the threshold of it being
           // worthwhile to turn on the solar pump and the roof valves are in tank mode, then turn on the solar pump
           
-          if (roof_valves_status_in_tank_mode()) {
-            if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
-              turn_solar_pump_on();
-              peak_tank_temperature_F = temps[tank_e].temperature_F;
-              peak_tank_temperature_time = millis();
-            }
+          if (roof_valves_status_in_tank_mode() && ((millis() - solar_pump_on_off_time) > solar_pump_delay)) {
+            turn_solar_pump_on();
+            peak_tank_temperature_F = temps[tank_e].temperature_F;
+            peak_tank_temperature_time = millis();
           }
         }
       }
@@ -919,29 +924,22 @@ void monitor_solar_pump_callback(void)
     } else {
       // The panel temperature is valid, but the tank temperature is not.  Just turn on the pump if the panels are above
       // 170F and turn it off at 1700.
-      if (!solar_pump_on() && average_panel_temperature_F > 170 && roof_valves_status_in_tank_mode()) {
-        if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
-          turn_solar_pump_on();
-        }
-      } else if (solar_pump_on() && h >= 17) {
-        if ((millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
-          turn_solar_pump_off(nullptr);
-        }
+      if (!solar_pump_on() && average_panel_temperature_F > 170 && roof_valves_status_in_tank_mode() && 
+              (millis() - solar_pump_on_off_time) > solar_pump_delay) {
+        turn_solar_pump_on();
+      } else if (solar_pump_on() && h >= 17 && (millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
+        turn_solar_pump_off(nullptr);
       }
     }
   } else {
     // We can't use the panel temperature, so just turn on the solar pump in the late morning and turn it off in the late
     // afternoon
-    if (!solar_pump_on() && h >= 11 && roof_valves_status_in_tank_mode()) {
-      if ((millis() - solar_pump_on_off_time) > solar_pump_delay) {
-        turn_solar_pump_on();
-      }
-    } else if (solar_pump_on() && h >= 17) {
+    if (!solar_pump_on() && h >= 11 && roof_valves_status_in_tank_mode() && (millis() - solar_pump_on_off_time) > solar_pump_delay) {
+      turn_solar_pump_on();
+    } else if (solar_pump_on() && h >= 17 && (millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
       // If we don't know the panel temperatures and we have run the solar pump for at least an hour and it is after 5PM,
       // turn off the solar pump.
-      if ((millis() - solar_pump_on_off_time) > 60 * 60 * 1000UL) {
-        turn_solar_pump_off(nullptr);
-      }
+      turn_solar_pump_off(nullptr);
     }
   }
 }
