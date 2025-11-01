@@ -19,6 +19,32 @@
    Robert Bedichek
 */
 
+// Most common operational parameters that might need adjusting
+
+const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
+const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
+
+// The next four constants set the temperature that the tank must be to trigger start using and to trigger stop using solar heat and electric
+// heat.  There difference between the high and low values creates a hysterisis that prevents cycling the solar heat and the electric heat
+// too frequently.  It is ok for both the solar and the electric heat to be enabled at the same time.
+
+
+const int tank_temp_threshold_spa_hex_high = 115;   // Solar spa heat enabled above this tank temperature
+const int tank_temp_threshold_spa_hex_low = 110;    // Solar spa heat disabled below this tank temperature
+
+const int tank_temp_threshold_spa_electric_heater_high = 118; // Electric spa heat disabled above this tank temperature
+const int tank_temp_threshold_spa_electric_heater_low = 113;  // Electric spa heat disabled about this tank temperature
+
+
+// The panels must be at least this much hotter than the tank to turn on the solar pump
+const float tank_panel_difference_threshold_on_F = 30;
+
+// When the panels drop to being just this much hotter than the tank, turn off the solar pump
+const float tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels this much colder than tank
+
+const unsigned long solar_pump_delay = 5 * 60 * 1000UL;         // Minimum of five minutes between solar-pump-on events
+
+
 #include <string.h> //Use the string Library
 #include <ctype.h>
 const unsigned long MAX_ULONG = 0xFFFFFFFF;
@@ -267,31 +293,8 @@ bool pool_heating_season(void); // Returns true when today is a day we might hea
 bool pool_heating_inop = false; // Set true if heating the pool doesn't work
 void open_spa_heat_exchanger_valve(const __FlashStringHelper *message);
 
-// After Claude thought there was an error in the code, and then I replied, it then observed:
-
-      // Valve opens when tank ≥ 113°F (tank_temp_threshold_spa_hex_high)
-      // Electric heat enables when tank ≤ 110°F (tank_temp_threshold_spa_hex_low) (valve open) or ≤ 113°F (valve closed) (line 731)
-
-      // This creates a 3-degree hysteresis band (110°F to 113°F) that prevents oscillation. When the valve 
-      // is open and providing solar assist, you allow the tank to drop to 110°F before enabling electric backup. 
-      // When the valve is closed (no solar assist), you enable electric heat at the higher 113°F threshold.
-      // This is actually well-designed control logic. The electric heater thresholds being lower than the 
-      // valve opening threshold prevents rapid cycling, and the different thresholds based on valve state 
-      // optimize between solar heating (when available) and electric backup.
-  
-      int tank_temp_threshold_spa_hex_high = 113;
-      int tank_temp_threshold_spa_hex_low = 110;
-/*****************************************************************************************************/
-
-const unsigned long solar_pump_delay = 5 * 60 * 1000UL;         // Five minutes between solar pump on events
-
 float average_panel_temperature_F;   // Average of leftmost and rightmost panels
 
-// The panels must be at least this much hotter than the tank to turn on the solar pump
-const float tank_panel_difference_threshold_on_F = 25;
-
-// When the panels drop to being just this much hotter than the tank, turn off the solar pump
-const float tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels this much colder than tank
 unsigned long solar_pump_on_off_time;   // Set to millis()  when pump is turned on and off
 unsigned long daily_milliseconds_of_solar_pump_on_time; // Number of milliseconds the solar pump has run today
 
@@ -302,7 +305,6 @@ Task monitor_solar_pump(TASK_SECOND * 60, TASK_FOREVER, &monitor_solar_pump_call
 /*****************************************************************************************************/
 bool spa_heater_relay_on(void);             // True if we have enabled the spa heater relay, off by default
 
-const int tank_temp_threshold_spa_heater_off = 120; // When the Tank temperature gets this hot or hotter, turn off the spa electric heater
 unsigned long daily_milliseconds_of_spa_heater_on_time;
 unsigned long spa_heater_relay_on_time;            // Set to millis() when heater is switched on
 Task monitor_spa_electric_heat(TASK_SECOND * 60, TASK_FOREVER, &monitor_spa_electric_heat_callback, &ts, true);
@@ -310,7 +312,6 @@ Task monitor_spa_electric_heat(TASK_SECOND * 60, TASK_FOREVER, &monitor_spa_elec
 // Seconds since we made a change to the pool heat request relay
 unsigned long pool_heat_request_relay_on_off_time;   
 
-const unsigned recirc_on_time_in_seconds = 90;
 bool recirc_pump_on();
 
 void turn_recirc_pump_on(void);
@@ -319,9 +320,6 @@ void turn_recirc_pump_off(const __FlashStringHelper *message);
 Task monitor_recirc_pump(TASK_SECOND * 10, TASK_FOREVER, &monitor_recirc_pump_callback, &ts, true);
 /*****************************************************************************************************/
 #define TAKAGI_DELAY           (300)    // Minimum number of seconds between Tagaki on events
-const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
-const int takagi_off_threshold_F = 125; // If the tank is this or above, turn the Takagi off and let the solar mass do all the heating
-
 bool takagi_on(void);
 
 void turn_takagi_on(void);
@@ -1031,7 +1029,7 @@ void monitor_spa_electric_heat_callback(void)
         // relay on within the hour or if the spa is not calling for heat, 
         // disable electric spa heat
         unsigned long milliseconds_spa_heater_relay_on = millis() - spa_heater_relay_on_time;
-        if (temps[tank_e].temperature_F >= tank_temp_threshold_spa_heater_off && (milliseconds_spa_heater_relay_on > (3600 * 1000UL))) {
+        if (temps[tank_e].temperature_F >= tank_temp_threshold_spa_electric_heater_high && (milliseconds_spa_heater_relay_on > (3600 * 1000UL))) {
           turn_spa_heater_relay_off(nullptr);
         }
       } else {
@@ -1043,7 +1041,7 @@ void monitor_spa_electric_heat_callback(void)
         // Be more patient heating the spa with solar during hours when it is unlikely anyone will 
         // be using the spa
         unsigned long minutes_limit = (1 <= h && h <= 6) ? 120 : 90;  // 90 minutes daytime, 2u hours in the middle of the night.
-        if (temps[tank_e].temperature_F <= (spa_heat_ex_valve_open() ? tank_temp_threshold_spa_hex_low : tank_temp_threshold_spa_hex_high) ||
+        if (temps[tank_e].temperature_F <= tank_temp_threshold_spa_electric_heater_low ||
            (spa_heat_ex_valve_open() && (milliseconds_valve_open > (minutes_limit * 60 * 1000UL)))) {
             if (valve_verbose) {
               snprintf(cbuf, sizeof(cbuf), "# spaH=%d valve_open=%d time=%u",
