@@ -1704,9 +1704,6 @@ void setup_arduino_pins(void)
   turn_takagi_off(nullptr);
   pinMode(SSR_TAKAGI_PIN, OUTPUT);       // Pin 13, which is also the Arduino LED control.  LED is off when Takagi on, LED on when Takagi is off
   
-//  pinMode(SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN, INPUT_PULLUP);
-//  pinMode(SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN, INPUT_PULLUP);
-
   pinMode(SPA_HEAT_DIGITAL_IN_PIN, INPUT_PULLUP);
   
   pinMode(ROOF_VALVES_STATUS_PIN, INPUT_PULLUP); 
@@ -1719,7 +1716,7 @@ void setup_temperature_sensors()
   temps[tank_e].lower_bound_F = 40;
   temps[tank_e].upper_bound_F = 190;
 
-  temps[left_panel_e].input_pin = A3;  // Leftmost solar panel temperature
+  temps[left_panel_e].input_pin = A1;  // Leftmost solar panel temperature
   temps[left_panel_e].calibration_offset_F = 3; 
   temps[left_panel_e].lower_bound_F = 10;
   temps[left_panel_e].upper_bound_F = 280;
@@ -1729,30 +1726,12 @@ void setup_temperature_sensors()
   temps[spa_e].lower_bound_F = 32;
   temps[spa_e].upper_bound_F = 120;
 
-  temps[right_panel_e].input_pin = A1;    // Rightmost solar panel temperature
+  temps[right_panel_e].input_pin = A3;    // Rightmost solar panel temperature
   temps[right_panel_e].calibration_offset_F = 2; 
   temps[right_panel_e].lower_bound_F = 10;
   temps[right_panel_e].upper_bound_F = 280;
-
-  // Give approximate initial values to the tank temperature.  Otherwise on startup, it
-  // can cause the Takagi and Spa electric heat enable to come on for a few minutes.  No
-  // harm in that, but can be slightly confusing.  We only do this for the tank temperature
-  // to save program space.  Also do this for spa so that the graphs don't have a dip
-  // every time the controller reboots.
-
-  const bool need_for_seed = true;
-  if (need_for_seed) {
-    int adc_value = analogRead(temps[tank_e].input_pin);
-    float voltage = (float)adc_value * (5.0 / 1023.0);
-    float temp_C = (voltage - 0.5) * 100.0; /* TMP36 gives voltage of 0.5 for 0C and 10mv per degree C */
-    temps[tank_e].temperature_F += temp_C * (90.0 / 50.0) + 32.0 + temps[tank_e].calibration_offset_F;
-
-    adc_value = analogRead(temps[spa_e].input_pin);
-    voltage = (float)adc_value * (5.0 / 1023.0);
-    temp_C = (voltage - 0.5) * 100.0; /* TMP36 gives voltage of 0.5 for 0C and 10mv per degree C */
-    temps[spa_e].temperature_F += temp_C * (90.0 / 50.0) + 32.0 + temps[spa_e].calibration_offset_F;
-  }
 }
+
 void setup_lcd(void)
 {
   if (lcd != 0) {
