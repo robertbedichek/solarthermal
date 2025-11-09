@@ -37,10 +37,10 @@ const int tank_temp_threshold_spa_electric_heater_low = 113;  // Electric spa he
 
 
 // The panels must be at least this much hotter than the tank to turn on the solar pump
-const float tank_panel_difference_threshold_on_F = 30;
+const float tank_panel_difference_threshold_on_F = 20;
 
 // When the panels drop to being just this much hotter than the tank, turn off the solar pump
-const float tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels this much colder than tank
+// const float tank_panel_difference_threshold_off_F = -10; // Keep running pump until panels this much colder than tank
 
 const unsigned long solar_pump_delay = 5 * 60 * 1000UL;         // Minimum of five minutes between solar-pump-on events
 
@@ -865,8 +865,17 @@ void monitor_solar_pump_callback(void)
     }
 
     if (temps[tank_e].temperature_valid) {
-      if (!solar_pump_on() && temps[tank_e].temperature_F < 165 &&
-          average_panel_temperature_F > (temps[tank_e].temperature_F + tank_panel_difference_threshold_on_F)) {
+      float tank_F = temps[tank_e].temperature_F;
+      // If the solar pump is off and the tank is not super hot and 
+      // the average solar panel temperature is more than the tank temperature plus a threshold
+      // and both of the measured panels is warmer than the tank temperature and it has been
+      // five minutes since these conditions were met and it hasn't been to short a time since
+      // the last time we turned the solar pump on or off, then turn it on.
+      
+      if (!solar_pump_on() && tank_F < 165 &&
+          average_panel_temperature_F > (tank_F + tank_panel_difference_threshold_on_F) &&
+          (!temps[left_panel_e].temperature_valid || temps[left_panel_e].temperature_F > tank_F) &&
+          (!temps[right_panel_e].temperature_valid || temps[right_panel_e].temperature_F > tank_F)) {
         if (first_high_temp_time == 0) {
           first_high_temp_time = millis();
         } else if ((millis() - first_high_temp_time) > 5 * 60 * 1000UL) {
@@ -891,18 +900,14 @@ void monitor_solar_pump_callback(void)
         // then turn the solar pump off.
         if (temps[tank_e].temperature_F > 170) {
           turn_solar_pump_off(F("alert: tank too hot"));
-        } else if (average_panel_temperature_F < (temps[tank_e].temperature_F + tank_panel_difference_threshold_off_F) &&
-          // Only allow the pump to shut off for low temperature if we turned it on more than 45 minutes ago.  This
-          // is to prevent cycling on and off too frequently due to temperature shifts.
-          (millis() - solar_pump_on_off_time) > 45 * 60 * 1000UL) {
-          turn_solar_pump_off(F("panels too cold relative to tank"));
-        } else if (temps[tank_e].temperature_F < peak_tank_temperature_F && (millis() - peak_tank_temperature_time) > 5 * 60 * 1000UL) {
-          // The tank temperature has fallen below the peak tank temperature and it has been more than five minutes since the peak 
-          // temperature was recorded.
-          turn_solar_pump_off(F("tank cooling"));
-        } else if ((int)temps[tank_e].temperature_F == (int)peak_tank_temperature_F && (millis() - peak_tank_temperature_time) > 30 * 60 * 1000UL) {
-          // The tank temperature has not increased by a whole degree for 30 minutes.
-          turn_solar_pump_off(F("tank not warming"));
+        } else 
+          // Turn off the solar pump if the following conditions are met:
+          // 1. The average panel temperature is less than the tank temperature
+          // 2. The tank has cooled by a degree farenheight from its peak temperature
+          // 3. It has been at least 45 minutes since the tank reached its peak temperature
+             if (average_panel_temperature_F < temps[tank_e].temperature_F &&
+            temps[tank_e].temperature_F < (peak_tank_temperature_F - 1.0) && (millis() - peak_tank_temperature_time) > 45 * 60 * 1000UL){
+            turn_solar_pump_off(F("panels colder than tank and tank cooling"));
         } else if (h >= 20) {
           turn_solar_pump_off(F("alert: solar pump still on at 8PM"));
         } else if (spring_or_fall_month && h >= 18) {
@@ -1695,7 +1700,7 @@ void setup_arduino_pins(void)
   pinMode(KEY_3_PIN, INPUT_PULLUP);
   pinMode(KEY_4_PIN, INPUT_PULLUP);
 
-  turn_solar_pump_off(nullptr);
+  turn_solar_pump_off(nullptr);         // The digital output pin comes up in a low state, which is the active state for this output
   pinMode(SSR_SOLAR_PUMP_PIN, OUTPUT); 
 
   turn_recirc_pump_off(nullptr);
