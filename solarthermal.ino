@@ -330,8 +330,6 @@ unsigned long takagi_on_time;                 // Set to millis() the last time t
 
 Task monitor_takagi(TASK_SECOND * 60, TASK_FOREVER, &monitor_takagi_callback, &ts, true);
 /*****************************************************************************************************/
-//   All the operational code uses this time structure.  This is initialized at start time from the battery-backed up DS3231 RTC.
-time_t arduino_time;
 
 Task monitor_clock(TASK_SECOND * 3600, TASK_FOREVER, &monitor_clock_callback, &ts, true);
 /*****************************************************************************************************/
@@ -511,7 +509,7 @@ const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
 // Returns true when today is a day we might heat the pool
 bool pool_heating_season(void)
 {
-  int m = month(arduino_time);
+  int m = month(now());
   return (m >= 5 && m <= 9);
 }
 
@@ -523,7 +521,6 @@ void read_time_and_sensor_inputs_callback(void)
   static int oor_counter = 0;
   static bool first_time = true; // Used to initialize the EMA filter, so that the first few temperature measurements
                                  // are not so far off
-  arduino_time = now();
 
   if (oor_counter >= 10) {
     // On average, if the oor_counter has gone to its maximum value, decrement it by one
@@ -578,7 +575,7 @@ void read_time_and_sensor_inputs_callback(void)
         oor_counter++;
       } else {
         // At the top of the hour, reset the out-of-range counter that limits spew
-        if (minute(arduino_time) == 0) {
+        if (minute(now()) == 0) {
           oor_counter = 0;
         }
       }
@@ -837,8 +834,8 @@ void monitor_solar_pump_callback(void)
     return;
   }
 
-  int h = hour(arduino_time);
-  int m = month(arduino_time);
+  int h = hour(now());
+  int m = month(now());
   bool winter_month = m <= 2 || m >= 11;
   bool spring_or_fall_month = m == 3 || m == 10;
 
@@ -1042,7 +1039,7 @@ void monitor_spa_electric_heat_callback(void)
         unsigned long milliseconds_valve_open = millis() - last_valve_open_time;
         // If the tank is too cool or if the spa valve has been open for more than 90 (daytime) to 120 minutes (wee hours), enable the spa's electric heater
         // for at least an hour
-        unsigned h = hour(arduino_time);
+        unsigned h = hour(now());
         // Be more patient heating the spa with solar during hours when it is unlikely anyone will 
         // be using the spa
         unsigned long minutes_limit = (1 <= h && h <= 6) ? 120 : 90;  // 90 minutes daytime, 2u hours in the middle of the night.
@@ -1190,12 +1187,12 @@ void print_periodic_header_and_summary_data(void)
   check_free_memory(F("print_periodic.."));
   static bool daily_stats_reset = false;
   snprintf(cbuf, sizeof(cbuf), "# %4u-%02u-%02u %02u:%02u:%02u ", 
-        year(arduino_time),
-        month(arduino_time), 
-        day(arduino_time), 
-        hour(arduino_time),
-        minute(arduino_time), 
-        second(arduino_time));
+        year(now()),
+        month(now()), 
+        day(now()), 
+        hour(now()),
+        minute(now()), 
+        second(now()));
   
   Serial.print(cbuf);
   unsigned long sp_on = 0;
@@ -1220,7 +1217,7 @@ void print_periodic_header_and_summary_data(void)
   Serial.print(cbuf);
   Serial.println(F("built: " __DATE__ " " __TIME__));
 
-  if (hour(arduino_time) == 0) {
+  if (hour(now()) == 0) {
     if (!daily_stats_reset) {
       daily_valve_cycles = 0;
       daily_milliseconds_of_solar_pump_on_time = 0;
@@ -1289,13 +1286,14 @@ void print_status_to_serial_callback(void)
     // Sample output
     // # Date     Time Year Mode Tank Panel SpaT SpaH Spump Rpump Taka Call Open Clsd Time Erro
     // Mar 25 10:23:24 2025 Oper  138  157    99    0     0     0    0    0    0    1    0    0
+    time_t t = now();
     snprintf(cbuf, sizeof(cbuf), "%4u-%02u-%02u %02u:%02u:%02u ", 
-        year(arduino_time),
-        month(arduino_time), 
-        day(arduino_time), 
-        hour(arduino_time),
-        minute(arduino_time), 
-        second(arduino_time));
+        year(t),
+        month(t), 
+        day(t), 
+        hour(t),
+        minute(t), 
+        second(t));
 
     Serial.print(cbuf);
     snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %4d %4d ",     
@@ -1357,20 +1355,24 @@ void monitor_serial_console_callback(void)
       Serial.print(F("# Received line: "));
       Serial.println(received_command_buf);
         
+      time_t arduino_time = now();
+      DateTime rtc_time = rtc.now();
       switch (received_command_buf[0]) {
         case 'd': // Set date command, "d year-month-day", e.g., "t 2025-05-23" to set the date
         {
-          int year, month, day;
-          sscanf(received_command_buf + 2, "%d-%d-%d", &year, &month, &day);
-          setTime(hour(arduino_time), minute(arduino_time), second(arduino_time), day, month, year);
+          int host_year, host_month, host_day;
+          sscanf(received_command_buf + 2, "%d-%d-%d", &host_year, &host_month, &host_day);
+          setTime(hour(arduino_time), minute(arduino_time), second(arduino_time), host_day, host_month, host_year);
+          rtc.adjust(DateTime(host_year, host_month, host_day, rtc_time.hour(), rtc_time.minute(), rtc_time.second()));
         }
         break; 
 
         case 't': // Set time command, "t hh:mm:ss", e.g., "t 9:23:33" to set the time.
         {
-          int hh, mmin, ss;
-          sscanf(received_command_buf + 2, "%d:%d:%d", &hh, &mmin, &ss);
-          setTime(hh, mmin, ss, day(arduino_time), month(arduino_time), year(arduino_time));
+          int host_hour, host_minute, host_second;
+          sscanf(received_command_buf + 2, "%d:%d:%d", &host_hour, &host_minute, &host_second);
+          setTime(host_hour, host_minute, host_second, day(arduino_time), month(arduino_time), year(arduino_time));
+          rtc.adjust(DateTime(rtc_time.year(), rtc_time.month(), rtc_time.day(), host_hour, host_minute, host_second));
         }
         break;
 
@@ -1421,8 +1423,9 @@ void update_lcd_callback(void)
     if (fail_message_time != 0 && (millis() - fail_message_time) > 64000) {
       fail_message_time = 0;
     } else {
+      time_t t = now();
       snprintf(cbuf, sizeof(cbuf), "%02d:%02d:%02d %4s %4s ", 
-        hour(arduino_time), minute(arduino_time), second(arduino_time), 
+        hour(t), minute(t), second(t), 
         spa_heat_ex_valve_open() ? "Open" : "Clsd",
         operating_mode_to_string(operating_mode));
       lcd->print(cbuf);
@@ -1476,8 +1479,8 @@ void turn_recirc_pump_off(const __FlashStringHelper *message)
 void monitor_recirc_pump_callback(void)
 {
   check_free_memory(F("monitor_recirc_.."));
-  unsigned h = hour(arduino_time);
-  unsigned m = minute(arduino_time);
+  unsigned h = hour(now());
+  unsigned m = minute(now());
   
 // Turn the recirc pump on at the top of the hour and at the half hour for two minutes.  However, if the
 // the Takagi is on, restrict the operating time to 8AM to 11PM
@@ -1652,7 +1655,7 @@ void monitor_takagi_callback(void)
 void monitor_clock_callback(void)
 {
   check_free_memory(F("mc"));
-  arduino_time = now();
+
   
   DateTime rtc_now = rtc.now();
   int rtc_h = rtc_now.hour();
@@ -1662,12 +1665,13 @@ void monitor_clock_callback(void)
   int rtc_mo = rtc_now.month();
   int rtc_y = rtc_now.year();
 
-  int arduino_h = hour(arduino_time);
-  int arduino_m = minute(arduino_time);
-  int arduino_s = second(arduino_time);
-  int arduino_d = day(arduino_time);
-  int arduino_mo = month(arduino_time);
-  int arduino_y = year(arduino_time);
+  time_t t = now();
+  int arduino_h = hour(t);
+  int arduino_m = minute(t);
+  int arduino_s = second(t);
+  int arduino_d = day(t);
+  int arduino_mo = month(t);
+  int arduino_y = year(t);
   
   if (rtc_y != arduino_y || rtc_mo != arduino_mo || rtc_d != arduino_d ||
    rtc_h != arduino_h || rtc_m != arduino_m || rtc_s != arduino_s) {
@@ -1679,12 +1683,12 @@ void monitor_clock_callback(void)
       Serial.println(cbuf);
 
       snprintf(cbuf, sizeof(cbuf), "%4u-%02u-%02u %02u:%02u:%02u ", 
-        year(arduino_time),
-        month(arduino_time), 
-        day(arduino_time), 
-        hour(arduino_time),
-        minute(arduino_time), 
-        second(arduino_time));
+        arduino_y,
+        arduino_mo, 
+        arduino_d, 
+        arduino_h,
+        arduino_m, 
+        arduino_s);
       Serial.println(cbuf);
    }
 
@@ -1913,7 +1917,12 @@ void setup_rtc(void)
     monitor_clock.disable();
   } else {
     if(rtc.lostPower() || force_RTC_reload_from_build_time ) {
-      // this will adjust to the date and time at compilation
+      // this will adjust to the date and time at compilation.  This is the old
+      // way to set the RTC's time, now we normally set it when the gobble_solarthermal.py script
+      // notices a difference between its system time (the time of a Mac Mini) and the time
+      // in the output records that this program emits.  When it notices this, it sends 't' and 'd'
+      // commands to adjust our time and when we get those, we set both the Arduino time and date, and the RTC
+      // time and date.
       rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
 
       // Add 15 seconds to compensate for the time to upload the sketch
@@ -1939,14 +1948,8 @@ void setup_rtc(void)
     // again, this isn't done at reboot, so a previously set alarm could easily go overlooked
     rtc.disableAlarm(2);
 
-    DateTime now = rtc.now();
-    int h = now.hour();
-    int m = now.minute();
-    int s = now.second();
-    int d = now.day();
-    int mo = now.month();
-    int y = now.year();
-    setTime(h, m, s, d, mo, y);
+    DateTime rtc_now = rtc.now();
+    setTime(rtc_now.hour(), rtc_now.minute(), rtc_now.second(), rtc_now.day(), rtc_now.month(), rtc_now.year());
 
     if (verbose_rtc) {
       Serial.print(F("# Set time from RTC: "));
@@ -1989,7 +1992,6 @@ void setup(void)
 
   sei();  // Enable global interrupts
 
-  arduino_time = now();  // should not be necessary
   setup_temperature_sensors();
 }
 
