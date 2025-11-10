@@ -901,9 +901,9 @@ void monitor_solar_pump_callback(void)
           // Turn off the solar pump if the following conditions are met:
           // 1. The average panel temperature is less than the tank temperature
           // 2. The tank has cooled by a degree farenheight from its peak temperature
-          // 3. It has been at least 45 minutes since the tank reached its peak temperature
+          // 3. It has been at least 15 minutes since the tank reached its peak temperature
              if (average_panel_temperature_F < temps[tank_e].temperature_F &&
-            temps[tank_e].temperature_F < (peak_tank_temperature_F - 1.0) && (millis() - peak_tank_temperature_time) > 45 * 60 * 1000UL){
+            temps[tank_e].temperature_F < (peak_tank_temperature_F - 1.0) && (millis() - peak_tank_temperature_time) > 15 * 60 * 1000UL){
             turn_solar_pump_off(F("panels colder than tank and tank cooling"));
         } else if (h >= 20) {
           turn_solar_pump_off(F("alert: solar pump still on at 8PM"));
