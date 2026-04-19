@@ -29,7 +29,7 @@ SSH_COMMAND = [
     "cat >> /var/www/html/home/solarthermal.txt"
 ]
 
-port = "/dev/tty.usbserial-11240"   # Replace with your actual port
+port = "/dev/tty.usbserial-11440"   # Replace with your actual port
 baud_rate = 115200
 
 ser = serial.Serial(port, baud_rate, timeout=1)

@@ -19,6 +19,8 @@
    Robert Bedichek
 */
 
+bool disable_electric_heat = false;
+
 // Most common operational parameters that might need adjusting
 
 const int takagi_on_threshold_F = 120;  // If the tank falls below this temperature, turn the Takagi on
@@ -1034,6 +1036,9 @@ void monitor_spa_electric_heat_callback(void)
         if (temps[tank_e].temperature_F >= tank_temp_threshold_spa_electric_heater_high && (milliseconds_spa_heater_relay_on > (3600 * 1000UL))) {
           turn_spa_heater_relay_off(nullptr);
         }
+        if (disable_electric_heat) {
+          turn_spa_heater_relay_off(nullptr);
+        }
       } else {
         
         unsigned long milliseconds_valve_open = millis() - last_valve_open_time;
@@ -1043,7 +1048,7 @@ void monitor_spa_electric_heat_callback(void)
         // Be more patient heating the spa with solar during hours when it is unlikely anyone will 
         // be using the spa
         unsigned long minutes_limit = (1 <= h && h <= 6) ? 120 : 90;  // 90 minutes daytime, 2u hours in the middle of the night.
-        if (temps[tank_e].temperature_F <= tank_temp_threshold_spa_electric_heater_low ||
+        if (!disable_electric_heat && temps[tank_e].temperature_F <= tank_temp_threshold_spa_electric_heater_low ||
            (spa_heat_ex_valve_open() && (milliseconds_valve_open > (minutes_limit * 60 * 1000UL)))) {
             if (valve_verbose) {
               snprintf(cbuf, sizeof(cbuf), "# spaH=%d valve_open=%d time=%u",
@@ -1055,7 +1060,7 @@ void monitor_spa_electric_heat_callback(void)
       }
     }
   } else {
-    if (!spa_heater_relay_on()) {
+    if (!disable_electric_heat && spa_heater_relay_on()) {
       // If the tank temperature is not valid, play it safe and turn on the electric heater
       turn_spa_heater_relay_on(F("# alert tank temp invalid, spa heater on, t="));
       Serial.print((int)temps[tank_e].temperature_F);
@@ -1486,7 +1491,7 @@ void monitor_recirc_pump_callback(void)
 // the Takagi is on, restrict the operating time to 8AM to 11PM
 
   if (!recirc_pump_on()) {
-    if ((h >= 8 && h <= 23) || !takagi_on()) {
+    if ((h >= 7 && h <= 23) || !takagi_on()) {
       switch (m) {
         case 0: 
         case 30:
