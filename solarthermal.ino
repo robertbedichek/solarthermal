@@ -208,7 +208,7 @@ unsigned long roof_valves_motion_start_time; // Value of millis() the last time 
 // #define SPA_HEAT_EX_VALVE_STATUS_OPEN_PIN   (10)  // Green wire from the Solid Valve, which goes to Green CAT5. Valve is open when this is a zero
 // #define SPA_HEAT_EX_VALVE_STATUS_CLOSED_PIN (3)  // Red wire on Solid valve, which goes to Orange CAT5.  Valve is closed when this is zero.
 
-typedef enum {m_oper, m_safe, m_poolheat, m_roof_valves, m_rpump, m_spump, m_takagi, m_spa_hex_valve, m_spa_elec, m_last} operating_mode_t;
+typedef enum {m_oper, m_poolheat, m_roof_valves, m_rpump, m_spump, m_takagi, m_spa_hex_valve, m_spa_elec, m_last} operating_mode_t;
 
 void read_time_and_sensor_inputs_callback(void);
 void print_status_to_serial_callback(void);
@@ -639,7 +639,7 @@ void read_time_and_sensor_inputs_callback(void)
 
 const char *operating_mode_to_string(operating_mode_t operating_mode) 
 {
-  char *s[] = {"Oper", "Safe", "Pool", "Roof", "D-RP", "D-SP", "D-TK", "D-HX", "D-EL"};
+  char *s[] = {"Oper", "Pool", "Roof", "D-RP", "D-SP", "D-TK", "D-HX", "D-EL"};
   if (operating_mode < m_last) {
     return s[operating_mode];
   }
@@ -708,7 +708,6 @@ void process_pressed_keys_callback(void)
   if (plus_key_pressed) {
     switch (operating_mode) {
       case m_oper:
-      case m_safe:
         adjustTime(600);
         break;
 
@@ -792,7 +791,7 @@ void process_pressed_keys_callback(void)
     minus_key_pressed = false;
   }
   if (some_key_pressed) {
-    if (operating_mode == m_oper || operating_mode == m_safe) {
+    if (operating_mode == m_oper) {
       monitor_diag_mode.disable();
     } else {
       monitor_diag_mode.enable();
@@ -1649,7 +1648,7 @@ void monitor_takagi_callback(void)
   check_free_memory(F("mt_"));
   static unsigned long last_takagi_change = 0;
 
-  if (operating_mode == m_oper || operating_mode == m_safe) {
+  if (operating_mode == m_oper) {
     if (temps[tank_e].temperature_valid) {
       if (takagi_on() && temps[tank_e].temperature_F >= takagi_off_threshold_F) {
         turn_takagi_off(nullptr);
