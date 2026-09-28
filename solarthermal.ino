@@ -121,8 +121,15 @@ Scheduler ts;
 #define SSR_TAKAGI_PIN      (13)    // writing '0' turns on the Takagi natural-gas fired water heater, also Arduino LED
 #define SSR_SOLAR_PUMP_PIN  (12)    // writing '0' turns on solar pump
 #define SSR_RECIRC_PUMP_PIN (11)    // writing '0' turns on the recirculation pump
-#define ROOF_VALVES_STATUS_PIN (9)  // When 0, means roof valves are set for taking/sending water to solar tank
 
+/*
+ * When this status pin is 0, it means roof valves are set for taking/sending water to solar tank.  The pin is connected
+ * to two microswitches in series.  The other side of one of the microswitches are connected to ground.  So if both microswitches
+ * are closed, the input is ground, or 0.  Each microswitch is attached to one of the two roof valves and when the microswitch
+ * is closed (conducting) it means that the valve it is attached to is in the fully "CW" or clock-wise position, which is the position
+ * both need to be in to route the tank water up to the panels and back to the tank.
+ */
+#define ROOF_VALVES_STATUS_PIN (9)  
 /*
  * This relay, when energized, sends 12VDC to the data closet where it is spliced to another wire pair that goes
  * to the pool pump control.  This signal, when asserted requests that the pool controller send water to the roof.
@@ -420,12 +427,13 @@ bool roof_valves_set_to_tank_mode()
 {
   bool r1 = false;
   if (quad_lv_relay2 != nullptr) {
-   r1 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_THERMAL_MASS) == LOW;
+    r1 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_THERMAL_MASS) == LOW;
     bool r2 = quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POOL) == LOW;
     if (r1 != r2) {
       static unsigned char alert_spew;
       if (alert_spew < 20) {
-        Serial.println(F("# alert roof_valves_set_to_tank_mode() mismatch"));
+        Serial.print(F("# alert roof_valves_set_to_tank_mode() mismatch, r1="));
+        Serial.println(r1);
         alert_spew++;
       }
     }
@@ -1606,8 +1614,10 @@ void monitor_roof_valves_callback()
   // that their position matches what the status indicator says.
   if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
     static unsigned spew_count;
-    if (roof_valves_status_in_tank_mode() != roof_valves_set_to_tank_mode() && spew_count < 20) {
-      Serial.println(F("# alert roof valve status mismatch"));
+    bool r = roof_valves_status_in_tank_mode();
+    if (r != roof_valves_set_to_tank_mode() && spew_count < 20) {
+      Serial.print(F("# alert roof valve status mismatch, status="));
+      Serial.println(r);
       spew_count++;
     }
   }
