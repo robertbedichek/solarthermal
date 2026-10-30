@@ -1,0 +1,35 @@
+<?xml version="1.0" ?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Solar Thermal System">
+    <mxGraphModel>
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="2" value="Thermal Mass Tank" style="shape=process" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="300" y="200" width="160" height="200"/>
+        </mxCell>
+        <mxCell id="3" value="Spa Coil" style="ellipse" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="310" y="220" width="40" height="160"/>
+        </mxCell>
+        <mxCell id="4" value="DHW Coil" style="ellipse" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="390" y="220" width="40" height="160"/>
+        </mxCell>
+        <mxCell id="5" value="Spa" style="shape=cylinder" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="100" y="260" width="80" height="80"/>
+        </mxCell>
+        <mxCell id="6" value="Takagi Heater" style="shape=hexagon" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="260" width="100" height="60"/>
+        </mxCell>
+        <mxCell id="7" value="Cold Water Supply" style="shape=cloud" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="350" width="140" height="60"/>
+        </mxCell>
+        <mxCell id="8" value="Solar Pump" style="shape=mxgraph.flowchart.manualOperation" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="300" y="450" width="80" height="40"/>
+        </mxCell>
+        <mxCell id="9" value="Solar Panels" style="shape=parallelogram" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="280" y="60" width="160" height="60"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>

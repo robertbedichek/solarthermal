@@ -1,0 +1,56 @@
+<?xml version="1.0" ?>
+<mxfile host="app.diagrams.net">
+  <diagram name="Solar Thermal System">
+    <mxGraphModel>
+      <root>
+        <mxCell id="0"/>
+        <mxCell id="1" parent="0"/>
+        <mxCell id="2" value="Thermal Mass Tank" style="shape=process" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="300" y="200" width="160" height="200"/>
+        </mxCell>
+        <mxCell id="3" value="" style="ellipse;fillColor=none;strokeColor=blue" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="310" y="220" width="40" height="160"/>
+        </mxCell>
+        <mxCell id="4" value="" style="ellipse;fillColor=none;strokeColor=red" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="390" y="220" width="40" height="160"/>
+        </mxCell>
+        <mxCell id="5" value="Spa" style="shape=cylinder" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="100" y="260" width="80" height="80"/>
+        </mxCell>
+        <mxCell id="6" value="Takagi Heater" style="shape=hexagon" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="260" width="100" height="60"/>
+        </mxCell>
+        <mxCell id="7" value="Cold Water Supply" style="shape=cloud" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="520" y="360" width="140" height="50"/>
+        </mxCell>
+        <mxCell id="8" value="Solar Pump" style="shape=mxgraph.flowchart.manualOperation" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="300" y="460" width="80" height="40"/>
+        </mxCell>
+        <mxCell id="9" value="Solar Panels" style="shape=parallelogram" vertex="1" parent="1">
+          <mxGeometry as="geometry" x="280" y="60" width="160" height="60"/>
+        </mxCell>
+        <mxCell id="10" value="Drain" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="2" target="8">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+        <mxCell id="11" value="To Panel Inlets" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="8" target="9">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+        <mxCell id="12" value="Return from Panels" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="9" target="2">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+        <mxCell id="13" value="Spa to Coil" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="5" target="3">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+        <mxCell id="14" value="Coil to Spa" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="3" target="5">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+        <mxCell id="15" value="Cold In" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="7" target="4">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+        <mxCell id="16" value="Hot to Heater" style="endArrow=block;html=1;strokeWidth=2;" edge="1" parent="1" source="4" target="6">
+          <mxGeometry as="geometry" relative="1"/>
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
