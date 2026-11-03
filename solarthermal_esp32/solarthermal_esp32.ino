@@ -1906,7 +1906,7 @@ void upload_task(void *arg)
   }
 }
 
-bool verifyRollbackLater()
+extern "C" bool verifyRollbackLater()   // C linkage, or the core keeps its own version, which marks every image good
 {
   return true;
 }
