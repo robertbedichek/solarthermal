@@ -1,0 +1,165 @@
+#!/usr/bin/env python3
+"""stctl: build, load and talk to the ESP32 solar-thermal controller.
+
+  stctl build              compile solarthermal_esp32 (writes secrets.h first if needed)
+  stctl flash [PORT]       first load over USB-C (later loads go over the network)
+  stctl update             build, then load over the network; the controller restarts into it
+  stctl status             the controller's state (JSON)
+  stctl log [-f] [BYTES]   recent output; -f keeps following it
+  stctl mode oper|poolheat|roof|rpump|spump|takagi|hex|elec
+  stctl upload on|off      stream telemetry to bedichek.org (kept across restarts)
+  stctl + | - | reboot
+
+The controller is http://solarthermal, 192.168.1.9 (set STCTL_HOST to override).  Its two tokens live in
+~/.config/stctl/: lan_token (commands and updates from the LAN) and ingest_token (its uploads to
+bedichek.org).  They are made on first use and compiled into the firmware; never print them.
+"""
+
+import glob
+import os
+import secrets
+import subprocess
+import sys
+import time
+import urllib.error
+import urllib.request
+import uuid
+
+HERE = os.path.dirname(os.path.realpath(__file__))
+SKETCH = os.path.join(HERE, "solarthermal_esp32")
+BUILD = os.path.join(HERE, "build")
+FQBN = ("esp32:esp32:esp32s3:FlashSize=16M,PartitionScheme=app3M_fat9M_16MB,"
+        "PSRAM=opi,CDCOnBoot=cdc")
+HOST = os.environ.get("STCTL_HOST", "192.168.1.9")
+CONF = os.path.expanduser("~/.config/stctl")
+
+
+def token(name):
+    path = os.path.join(CONF, name)
+    if not os.path.exists(path):
+        os.makedirs(CONF, mode=0o700, exist_ok=True)
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(secrets.token_hex(24) + "\n")
+    with open(path) as f:
+        return f.read().strip()
+
+
+def write_secrets():
+    text = ("// Written by stctl from ~/.config/stctl; not in git\n"
+            f'#define ST_LAN_TOKEN "{token("lan_token")}"\n'
+            f'#define ST_INGEST_TOKEN "{token("ingest_token")}"\n')
+    path = os.path.join(SKETCH, "secrets.h")
+    old = open(path).read() if os.path.exists(path) else None
+    if old != text:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+        with os.fdopen(fd, "w") as f:
+            f.write(text)
+
+
+def build():
+    write_secrets()
+    r = subprocess.run(["arduino-cli", "compile", "--fqbn", FQBN, "--output-dir", BUILD,
+                        "--warnings", "default", SKETCH])
+    if r.returncode != 0:
+        sys.exit(r.returncode)
+    return os.path.join(BUILD, "solarthermal_esp32.ino.bin")
+
+
+def request(path, data=None, timeout=10, headers=None):
+    req = urllib.request.Request(f"http://{HOST}{path}", data=data, headers=headers or {})
+    if data is not None:
+        req.add_header("X-Token", token("lan_token"))
+    try:
+        with urllib.request.urlopen(req, timeout=timeout) as r:
+            return r.read().decode(errors="replace")
+    except urllib.error.HTTPError as e:
+        sys.exit(f"stctl: {e.code} {e.read().decode(errors='replace').strip()}")
+    except (urllib.error.URLError, TimeoutError, OSError) as e:
+        sys.exit(f"stctl: can't reach {HOST}: {e}")
+
+
+def command(text):
+    sys.stdout.write(request("/cmd", text.encode(), headers={"Content-Type": "text/plain"}))
+
+
+def update():
+    binary = build()
+    boundary = uuid.uuid4().hex
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"firmware\"; "
+            f"filename=\"solarthermal_esp32.bin\"\r\nContent-Type: application/octet-stream\r\n\r\n"
+            ).encode() + open(binary, "rb").read() + f"\r\n--{boundary}--\r\n".encode()
+    print(f"stctl: sending {len(body) // 1024} KB to {HOST}")
+    print(request("/update", body, timeout=120,
+                  headers={"Content-Type": f"multipart/form-data; boundary={boundary}"}).strip())
+    print("stctl: waiting for it to come back")
+    for _ in range(30):
+        time.sleep(3)
+        try:
+            with urllib.request.urlopen(f"http://{HOST}/status", timeout=3) as r:
+                print(r.read().decode())
+                print("stctl: it marks the new firmware good after a minute (firmware_verified)")
+                return
+        except OSError:
+            pass
+    sys.exit("stctl: no answer after 90 s; check `stctl status`")
+
+
+def flash(port):
+    binary = build()
+    if port is None:
+        ports = glob.glob("/dev/cu.usbmodem*")
+        if len(ports) != 1:
+            sys.exit(f"stctl: give the port; found {ports or 'none'}")
+        port = ports[0]
+    r = subprocess.run(["arduino-cli", "upload", "--fqbn", FQBN, "--input-dir", BUILD, "-p", port, SKETCH])
+    sys.exit(r.returncode)
+
+
+def log(args):
+    follow = "-f" in args
+    args = [a for a in args if a != "-f"]
+    nbytes = args[0] if args else "8000"
+    text = request(f"/log?bytes={nbytes}")
+    sys.stdout.write(text)
+    while follow:
+        time.sleep(2)
+        new = request("/log?bytes=8000")
+        # Print what follows the last line we have seen
+        tail = text.splitlines()[-1] if text else ""
+        idx = new.rfind(tail) if tail else -1
+        part = new[idx + len(tail) + 1:] if idx >= 0 else new
+        sys.stdout.write(part)
+        sys.stdout.flush()
+        if part:
+            text = new
+
+
+def main():
+    args = sys.argv[1:]
+    if not args or args[0] in ("-h", "--help", "help"):
+        print(__doc__)
+        return
+    cmd = args[0]
+    if cmd == "build":
+        print(build())
+    elif cmd == "flash":
+        flash(args[1] if len(args) > 1 else None)
+    elif cmd == "update":
+        update()
+    elif cmd == "status":
+        sys.stdout.write(request("/status"))
+    elif cmd == "log":
+        log(args[1:])
+    elif cmd == "mode" and len(args) == 2:
+        command(f"mode {args[1]}")
+    elif cmd == "upload" and len(args) == 2 and args[1] in ("on", "off"):
+        command(f"upload {args[1]}")
+    elif cmd in ("+", "-", "reboot"):
+        command(cmd)
+    else:
+        sys.exit(__doc__)
+
+
+if __name__ == "__main__":
+    main()
