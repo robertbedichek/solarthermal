@@ -72,7 +72,11 @@ const unsigned long MAX_ULONG = 0xFFFFFFFF;
 #define RS485_RX_PIN     (18)
 #define RS485_DE_PIN     (21)
 #define SPA_HEAT_DIGITAL_IN_PIN (4)   // DI1: spa calling for heat, low = active
-#define ROOF_VALVES_STATUS_PIN  (5)   // DI2: both roof valves in tank position, low = active
+// Limit switches on the two roof valves, each input low when its switch is closed.  CW is tank, CCW is pool.
+#define ROOF_VALVE1_TANK_PIN    (5)   // DI2
+#define ROOF_VALVE1_POOL_PIN    (6)   // DI3
+#define ROOF_VALVE2_TANK_PIN    (7)   // DI4
+#define ROOF_VALVE2_POOL_PIN    (8)   // DI5
 
 // The board's eight relays.  Relay numbers are provisional until the wiring is settled.
 #define RELAY_SOLAR_PUMP   (1)
@@ -352,7 +356,15 @@ void record_error(const __FlashStringHelper *warning_message)
   out.println(warning_message);
 }
 
-bool roof_valves_status_in_tank_mode() { return digitalRead(ROOF_VALVES_STATUS_PIN) == LOW; }
+// Bits 3..0: valve 1 tank, valve 1 pool, valve 2 tank, valve 2 pool
+uint8_t roof_valve_switches(void)
+{
+  return (digitalRead(ROOF_VALVE1_TANK_PIN) == LOW ? 8 : 0) | (digitalRead(ROOF_VALVE1_POOL_PIN) == LOW ? 4 : 0) |
+         (digitalRead(ROOF_VALVE2_TANK_PIN) == LOW ? 2 : 0) | (digitalRead(ROOF_VALVE2_POOL_PIN) == LOW ? 1 : 0);
+}
+// Each of these needs both valves confirmed, so "not in tank mode" no longer implies "ready for pool water".
+bool roof_valves_status_in_tank_mode() { return roof_valve_switches() == 0b1010; }
+bool roof_valves_status_in_pool_mode() { return roof_valve_switches() == 0b0101; }
 bool spa_calling_for_heat(void)        { return digitalRead(SPA_HEAT_DIGITAL_IN_PIN) == LOW; }
 bool takagi_on()                       { return quad_lv_relay1 != nullptr && quad_lv_relay1->getState(RELAY_TAKAGI); }
 bool solar_pump_on()                   { return quad_lv_relay1 != nullptr && quad_lv_relay1->getState(RELAY_SOLAR_PUMP); }
@@ -505,6 +517,7 @@ static void insertionSort(int arr[], int n) {
 
 // Twice a second: one reading of each channel, the last 16 trimmed and averaged, then the Arduino
 // version's EMA and range checks.
+bool sensors_ready = false;
 void read_time_and_sensor_inputs_callback(void)
 {
 #define NUM_SAMPLES (16)
@@ -565,6 +578,7 @@ void read_time_and_sensor_inputs_callback(void)
     }
   }
   first_time = false;
+  sensors_ready = true;
 
   if (temps[left_panel_e].temperature_valid && !left_panel_sensor_failed) {
     if (temps[right_panel_e].temperature_valid && !right_panel_sensor_failed) {
@@ -1134,15 +1148,15 @@ void print_periodic_header_and_summary_data(void)
       daily_stats_reset = false;
     }
   }
-  out.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Roof Pool Mode"));
+  out.println(F("# Date     Time     Tank LPan RPan Aveg SpaT SpaH Spmp Rpmp Taka Call Open Roof Pool Mode Vlv"));
 }
 // Called periodically.  More frequently after starting, then slows.
 //  Sends relevant telemetry back over the USB-serial link.
 void print_status_to_serial_callback(void)
 {
   check_free_memory(F("print_status_to.."));
-  if (!time_valid) {
-    return;   // Lines without a real date would land in the wrong place on the graphs
+  if (!time_valid || (!sensors_ready && millis() < 60 * 1000UL)) {
+    return;   // No lines without a real date, or with temperatures that haven't been read yet (zeros on the graphs)
   }
   static char line_counter = 0;
   static int records_skipped;
@@ -1160,6 +1174,7 @@ void print_status_to_serial_callback(void)
   static bool last_spa_call;
   static bool last_spa_open;
   static bool last_roof_valves_to_pool;
+  static uint8_t last_switches;
   static bool last_pool_heat;
   static operating_mode_t last_operating_mode;
   
@@ -1174,6 +1189,7 @@ void print_status_to_serial_callback(void)
       last_spa_call != spa_calling_for_heat() ||
       last_spa_open != spa_heat_ex_valve_open() ||
       last_roof_valves_to_pool != !roof_valves_status_in_tank_mode() ||
+      last_switches != roof_valve_switches() ||
       last_pool_heat != pool_heat_request_relay_on() ||
       last_operating_mode != operating_mode ||
       records_skipped++ > 800) {
@@ -1186,6 +1202,7 @@ void print_status_to_serial_callback(void)
     last_spa_call = spa_calling_for_heat();
     last_spa_open = spa_heat_ex_valve_open();
     last_roof_valves_to_pool = !roof_valves_status_in_tank_mode();
+    last_switches = roof_valve_switches();
     last_pool_heat = pool_heat_request_relay_on();
     last_operating_mode = operating_mode;
 
@@ -1223,10 +1240,14 @@ void print_status_to_serial_callback(void)
     out.print(cbuf);
 
 
-    snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d ",
-        !roof_valves_status_in_tank_mode(),
-        pool_heat_request_relay_on(),
-        operating_mode);
+    {
+      uint8_t sw = roof_valve_switches();
+      snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %d%d%d%d",
+          !roof_valves_status_in_tank_mode(),
+          pool_heat_request_relay_on(),
+          operating_mode,
+          (sw >> 3) & 1, (sw >> 2) & 1, (sw >> 1) & 1, sw & 1);
+    }
     
     out.println(cbuf);
     line_counter--;
@@ -1323,7 +1344,7 @@ void monitor_roof_valves_callback()
   
     if (roof_valves_set_to_pool_mode() && average_panel_temperature_F > 120) {
       if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
-        if (roof_valves_status_in_tank_mode()) {
+        if (!roof_valves_status_in_pool_mode()) {
           static unsigned char spew_counter;
           if (spew_counter < 10) {
             out.println(F("# alert roof valve timeout"));
@@ -1374,12 +1395,21 @@ void monitor_roof_valves_callback()
   // If it has been 30 seconds since we last commanded the roof valves to change position, check to ensure
   // that their position matches what the status indicator says.
   if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
-    static unsigned spew_count;
-    bool r = roof_valves_status_in_tank_mode();
-    if (r != roof_valves_set_to_tank_mode() && spew_count < 20) {
-      out.print(F("# alert roof valve status mismatch, status="));
-      out.println(r);
-      spew_count++;
+    // Report once each time the switches stop matching the command, and again if the pattern changes.
+    static uint8_t last_reported = 0xFF;
+    uint8_t sw = roof_valve_switches();
+    bool ok = roof_valves_set_to_tank_mode() ? roof_valves_status_in_tank_mode() : roof_valves_status_in_pool_mode();
+    if (ok) {
+      last_reported = 0xFF;
+    } else if (sw != last_reported) {
+      last_reported = sw;
+      if (sw == 0) {
+        out.println(F("# roof valve switches: none closed (not wired yet, or no common)"));
+      } else {
+        out.print(F("# alert roof valve switches 0x"));
+        out.print(sw, HEX);
+        out.println(roof_valves_set_to_tank_mode() ? F(" do not show tank mode") : F(" do not show pool mode"));
+      }
     }
   }
 }
@@ -1752,6 +1782,7 @@ void handle_status(void)
   s += "  \"solar_pump\": " + String(solar_pump_on()) + ", \"recirc_pump\": " + String(recirc_pump_on()) +
        ", \"takagi\": " + String(takagi_on()) + ", \"spa_electric\": " + String(spa_heater_relay_on()) + ",\n";
   s += "  \"spa_valve_open\": " + String(spa_heat_ex_valve_open()) + ", \"spa_call\": " + String(spa_calling_for_heat()) + ",\n";
+  s += "  \"roof_switches\": \"" + String(roof_valve_switches(), BIN) + "\", \"roof_status_pool\": " + String(roof_valves_status_in_pool_mode()) + ",\n";
   s += "  \"roof_status_tank\": " + String(roof_valves_status_in_tank_mode()) + ", \"roof_set_tank\": " + String(roof_valves_set_to_tank_mode()) +
        ", \"roof_power\": " + String(roof_valves_power_is_on()) + ", \"pool_request\": " + String(pool_heat_request_relay_on()) + ",\n";
   s += "  \"relays\": " + String(quad_lv_relay1 != nullptr ? quad_lv_relay1->state() : 0) +
