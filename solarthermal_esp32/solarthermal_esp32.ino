@@ -1956,7 +1956,7 @@ void setup_reset_cause(void)
 void setup_temperature_sensors()
 {
   temps[tank_e].channel = 0;            // Measures the voltage from the LM35 glued to the tank
-  temps[tank_e].calibration_offset_F = 15; // Calibrated by comparing with the 18B20 that has been on the tank for years
+  temps[tank_e].calibration_offset_F = 9;  // Set 2026-11-02 so the module matches the Arduino's 108 F (which was calibrated against the 18B20 on the tank)
   temps[tank_e].lower_bound_F = 40;
   temps[tank_e].upper_bound_F = 190;
 
