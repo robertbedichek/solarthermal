@@ -1,0 +1,1 @@
+(sym_lib_table (version 7) (lib (name "solarthermal") (type "KiCad") (uri "${KIPRJMOD}/solarthermal.kicad_sym") (options "") (descr "Solarthermal blocks")))
