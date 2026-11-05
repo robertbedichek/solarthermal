@@ -84,13 +84,14 @@ const unsigned long MAX_ULONG = 0xFFFFFFFF;
 #define RELAY_TAKAGI       (3)
 #define LV_RELAY1_SPA_ELEC_HEAT_ENABLE    (4)
 #define LV_RELAY2_POOL_HEAT_REQUEST       (5)
-// The roof valves' four motor wires, as on the old controller but without its third (power) relay.  These two relays
-// always switch together, in one write.  Energized = pool mode, released = tank (thermal mass) mode.  The motor stays
-// powered in the commanded direction; the valves' own motor limit switches stop it at the end of travel.
-//   Relay 6: COM ground,  NO Brown CAT5 Blue/White, NC Brown CAT5 Orange/White
-//   Relay 7: COM +12 VDC, NO Brown CAT5 Blue,       NC Brown CAT5 Orange
-#define RELAY_ROOF_MINUS                  (6)
-#define RELAY_ROOF_PLUS                   (7)
+// The roof valves' motor power and direction.  Relay 6 feeds +12 VDC to a 12 V coil DPDT relay and is on only for a
+// limited time after a command, so a failed limit switch can't leave a motor running.  Relay 7 drives the DPDT's coil.
+//   Relay 6: COM +12 VDC, NO DPDT pole A common
+//   Relay 7: COM +12 VDC, NO DPDT coil +, coil - to ground, flyback diode across the coil
+//   DPDT pole A: NO Brown CAT5 Blue,       NC Brown CAT5 Orange         (+)
+//   DPDT pole B: NO Brown CAT5 Blue/White, NC Brown CAT5 Orange/White   (-), common to ground
+#define LV_RELAY2_ROOF_VALVES_POWER       (6)
+#define RELAY_ROOF_DIRECTION              (7)  // Energized = pool mode, released = tank (thermal mass) mode
 #define LV_RELAY1_SPA_HEAT_EX_VALVE_OPEN  (8)  // Energized holds the spa valve open; released, it closes itself
 
 class Onboard_Relays {
@@ -98,7 +99,6 @@ public:
   bool begin(void);
   void turnRelayOn(uint8_t relay)  { set(relay, true); }
   void turnRelayOff(uint8_t relay) { set(relay, false); }
-  void setTwo(uint8_t relay_a, uint8_t relay_b, bool on);   // Both in a single write to the latch
   bool getState(uint8_t relay)     { return bits & (1 << (relay - 1)); }
   bool verify(void);
   uint8_t state(void)              { return bits; }
@@ -385,22 +385,28 @@ static void relay_write(uint8_t relay, bool on)
 // The roof valves' direction is one relay here (the Arduino had one per pole of the reversal).
 bool roof_valves_set_to_tank_mode()
 {
-  return quad_lv_relay2 != nullptr && !quad_lv_relay2->getState(RELAY_ROOF_PLUS);
+  return quad_lv_relay2 != nullptr && !quad_lv_relay2->getState(RELAY_ROOF_DIRECTION);
 }
 bool roof_valves_set_to_pool_mode(void) { return !roof_valves_set_to_tank_mode(); }
 
 // True from a command until the position switches confirm it, or until the 15 s check gives up.
 static bool roof_valves_move_pending = false;
 const unsigned long max_roof_valves_move_time = 15 * 1000UL;
+const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
+
+void turn_roof_valves_power_off(void) { relay_write(LV_RELAY2_ROOF_VALVES_POWER, false); }
+bool roof_valves_power_is_on(void)    { return quad_lv_relay2 != nullptr && quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POWER); }
 
 static void roof_valves_command(bool to_pool, const __FlashStringHelper *message)
 {
   out.print(message);
   roof_valves_motion_start_time = millis();
   roof_valves_move_pending = true;
-  if (quad_lv_relay2 != nullptr) {
-    quad_lv_relay2->setTwo(RELAY_ROOF_MINUS, RELAY_ROOF_PLUS, to_pool);
-  }
+  // Power off while the DPDT changes over, so its contacts never switch the motor's current.
+  turn_roof_valves_power_off();
+  relay_write(RELAY_ROOF_DIRECTION, to_pool);
+  delay(50);
+  relay_write(LV_RELAY2_ROOF_VALVES_POWER, true);
 }
 void turn_roof_valves_to_tank_mode(const __FlashStringHelper *message) { roof_valves_command(false, message); }
 void turn_roof_valves_to_pool_mode(const __FlashStringHelper *message) { roof_valves_command(true, message); }
@@ -1307,6 +1313,13 @@ void monitor_recirc_pump_callback(void)
 void monitor_roof_valves_callback()
 {
 
+  // Motor power is on only for a limited time after a command.  After a reset this time reads as long past, so power
+  // that was on across the reset goes off within a minute of starting.
+  if (roof_valves_power_is_on() && (millis() - roof_valves_motion_start_time) > max_roof_valves_power_on_time) {
+    turn_roof_valves_power_off();
+    out.println(F("# roof valves power off"));
+  }
+
   // If the solar pump is off and the tank is hot, and this is a day in the pool heating season,
   //  and we are not yet requesting that the pool controller send pool water to the roof, and we
   // have not given up on heating the pool (i.e., we haven't marked it "INOP"), and the panels
@@ -1505,20 +1518,6 @@ bool Onboard_Relays::begin(void)
   }
   bits = 0;
   return tca_write(1, 0x00) && tca_write(3, 0x00);
-}
-
-void Onboard_Relays::setTwo(uint8_t relay_a, uint8_t relay_b, bool on)
-{
-  uint8_t mask = (1 << (relay_a - 1)) | (1 << (relay_b - 1));
-  uint8_t b = on ? (bits | mask) : (bits & ~mask);
-  if (tca_write(1, b)) {
-    bits = b;
-  } else {
-    out.print(F("# alert relay board did not answer setting relays "));
-    out.print(relay_a);
-    out.print(F(" and "));
-    out.println(relay_b);
-  }
 }
 
 void Onboard_Relays::set(uint8_t relay, bool on)
@@ -1810,7 +1809,7 @@ void handle_status(void)
   s += "  \"spa_valve_open\": " + String(spa_heat_ex_valve_open()) + ", \"spa_call\": " + String(spa_calling_for_heat()) + ",\n";
   s += "  \"roof_switches\": \"" + String(roof_valve_switches(), BIN) + "\", \"roof_status_pool\": " + String(roof_valves_status_in_pool_mode()) + ",\n";
   s += "  \"roof_status_tank\": " + String(roof_valves_status_in_tank_mode()) + ", \"roof_set_tank\": " + String(roof_valves_set_to_tank_mode()) +
-       ", \"pool_request\": " + String(pool_heat_request_relay_on()) + ",\n";
+       ", \"roof_power\": " + String(roof_valves_power_is_on()) + ", \"pool_request\": " + String(pool_heat_request_relay_on()) + ",\n";
   s += "  \"relays\": " + String(quad_lv_relay1 != nullptr ? quad_lv_relay1->state() : 0) +
        ", \"analog_module\": " + String(analog_failures < 20 ? "true" : "false") + ",\n";
   {
