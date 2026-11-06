@@ -26,7 +26,7 @@
 #include <esp_ota_ops.h>
 #include <esp_sntp.h>
 
-#include "secrets.h"  // ST_LAN_TOKEN and ST_INGEST_TOKEN, written by stctl; not in git
+#include "secrets.h"  // ST_LAN_TOKEN, ST_INGEST_TOKEN and ST_PEER_TOKEN, written by stctl; not in git
 
 #define FIRMWARE_VERSION __DATE__ " " __TIME__
 char reset_cause = 'P';
@@ -83,7 +83,7 @@ const unsigned long MAX_ULONG = 0xFFFFFFFF;
 #define RELAY_RECIRC_PUMP  (2)
 #define RELAY_TAKAGI       (3)
 #define LV_RELAY1_SPA_ELEC_HEAT_ENABLE    (4)
-#define LV_RELAY2_POOL_HEAT_REQUEST       (5)
+#define RELAY_SPARE_5                     (5)  // Was the 12 V pool-heat request pair; the request now goes over the network
 // The roof valves' motor power and direction.  Relay 6 feeds +12 VDC to a 12 V coil DPDT relay and is on only for a
 // limited time after a command, so a failed limit switch can't leave a motor running.  Relay 7 drives the DPDT's coil.
 //   Relay 6: COM +12 VDC, NO DPDT pole A common
@@ -165,9 +165,18 @@ unsigned daily_valve_cycles;        // Number of valve-open operations per day
 
 Task monitor_spa_valve(TASK_SECOND * 10, TASK_FOREVER, &monitor_spa_valve_callback, &ts, true);
 Task monitor_roof_valves(TASK_SECOND, TASK_FOREVER, &monitor_roof_valves_callback, &ts, true);
+void monitor_pool_link_callback(void);
+Task monitor_pool_link(TASK_SECOND, TASK_FOREVER, &monitor_pool_link_callback, &ts, true);
 
 bool pool_heating_season(void); // Returns true when today is a day we might heat the pool
 bool pool_heating_inop = false; // Set true if heating the pool doesn't work
+// What the pool controller last said about our pool-heat request (see pool_link_task); here, ahead of the
+// prototypes the Arduino build generates
+struct Pool_Reply {
+  bool accepted, request, valve_roof, valve_power, main_pump, boost_pump;
+  float psi;
+  char mode[12];
+};
 
 
 float average_panel_temperature_F;   // Average of leftmost and rightmost panels
@@ -186,8 +195,8 @@ unsigned long daily_milliseconds_of_spa_heater_on_time;
 unsigned long spa_heater_relay_on_time;            // Set to millis() when heater is switched on
 Task monitor_spa_electric_heat(TASK_SECOND * 60, TASK_FOREVER, &monitor_spa_electric_heat_callback, &ts, true);
 /*****************************************************************************************************/
-// Seconds since we made a change to the pool heat request relay
-unsigned long pool_heat_request_relay_on_off_time;   
+// millis() when the pool-heat request last went on or off
+unsigned long pool_heat_request_on_off_time;
 
 bool recirc_pump_on();
 
@@ -368,6 +377,14 @@ uint8_t roof_valve_switches(void)
   return (digitalRead(ROOF_VALVE1_TANK_PIN) == LOW ? 8 : 0) | (digitalRead(ROOF_VALVE1_POOL_PIN) == LOW ? 4 : 0) |
          (digitalRead(ROOF_VALVE2_TANK_PIN) == LOW ? 2 : 0) | (digitalRead(ROOF_VALVE2_POOL_PIN) == LOW ? 1 : 0);
 }
+// The four switch bits as "1010", with leading zeros kept.
+String roof_switches_text(uint8_t sw)
+{
+  char s[5];
+  for (int i = 0; i < 4; i++) s[i] = (sw & (8 >> i)) ? '1' : '0';
+  s[4] = '\0';
+  return String(s);
+}
 // Each of these needs both valves confirmed, so "not in tank mode" no longer implies "ready for pool water".
 bool roof_valves_status_in_tank_mode() { return roof_valve_switches() == 0b1010; }
 bool roof_valves_status_in_pool_mode() { return roof_valve_switches() == 0b0101; }
@@ -389,10 +406,11 @@ bool roof_valves_set_to_tank_mode()
 }
 bool roof_valves_set_to_pool_mode(void) { return !roof_valves_set_to_tank_mode(); }
 
-// True from a command until the position switches confirm it, or until the 15 s check gives up.
+// True from a command until the position switches confirm it, or until the 10 s check gives up.  A move takes about
+// 8 s (measured 2026-11-05: 7.3 s to pool, 7.7 s to tank).
 static bool roof_valves_move_pending = false;
-const unsigned long max_roof_valves_move_time = 15 * 1000UL;
-const unsigned long max_roof_valves_power_on_time = 60 * 1000UL;
+const unsigned long max_roof_valves_move_time = 10 * 1000UL;
+const unsigned long max_roof_valves_power_on_time = 15 * 1000UL;
 
 void turn_roof_valves_power_off(void) { relay_write(LV_RELAY2_ROOF_VALVES_POWER, false); }
 bool roof_valves_power_is_on(void)    { return quad_lv_relay2 != nullptr && quad_lv_relay2->getState(LV_RELAY2_ROOF_VALVES_POWER); }
@@ -641,8 +659,8 @@ void plus_key(void)
         break;
 
       case m_poolheat:
-        turn_pool_heat_request_relay_on(F("# pool heat req="));
-        out.println(pool_heat_request_relay_on());
+        turn_pool_heat_request_on(F("# pool heat req="));
+        out.println(pool_heat_request_on());
         break;
 
       case m_roof_valves:
@@ -684,8 +702,8 @@ void minus_key(void)
         break;
 
       case m_poolheat:
-        turn_pool_heat_request_relay_off(F("# pool heat req="));
-        out.println(pool_heat_request_relay_on());
+        turn_pool_heat_request_off(F("# pool heat req="));
+        out.println(pool_heat_request_on());
         break;
 
       case m_roof_valves:
@@ -770,12 +788,12 @@ void monitor_solar_pump_callback(void)
     // If it has been more than five minutes and the panels are super hot, give an alert
     if (average_panel_temperature_F > 180) {
       if ((millis() - solar_pump_on_off_time) > 300 * 1000UL) {
-        if (pool_heat_request_relay_on()) {
+        if (pool_heat_request_on()) {
           // Pool controller not sending water to panels, despite our request.
           // Make the pool controller as not working and switch back to heating 
           // the termal mass 
           pool_heating_inop = true;
-          turn_pool_heat_request_relay_off(F("# heating pool water failed"));      
+          turn_pool_heat_request_off(F("# heating pool water failed"));      
           turn_roof_valves_to_tank_mode(F("# go back to heating the tank\n"));
           if (spew_counter < 20) {
             out.println(F("# alert panel overtemp with pool request"));
@@ -904,35 +922,200 @@ void turn_spa_heater_relay_off(const __FlashStringHelper *message)
   }
 }
 
-bool pool_heat_request_relay_on(void)
-{
-  bool v = false;
-  if (quad_lv_relay2 != nullptr) {
-    v = quad_lv_relay2->getState(LV_RELAY2_POOL_HEAT_REQUEST);
-  }
-  return v;
-}
+/*****************************************************************************************************/
+// Pool-heat request.  This used to be a 12 V pair from relay 5 to the pool controller's DI2, with no way back.  Now
+// pool_link_task sends it over the network: POST http://192.168.1.5/solar with "on" or "off", every 30 s and at once
+// when it changes.  The pool controller holds an "on" for 90 s, so if these stop (network down, this controller
+// resetting) the request ends there by itself.  Each reply says what the pool is doing; monitor_pool_link_callback
+// logs it, and drops the request (with an alert) if the pool isn't sending water to the roof.
 
-void turn_pool_heat_request_relay_on(const __FlashStringHelper *message)
+extern volatile bool eth_connected;
+
+#define POOL_SOLAR_URL "http://192.168.1.5/solar"
+#define POOL_LINK_PERIOD_MS (30 * 1000UL)
+#define POOL_ACK_TIME_MS (3 * 60 * 1000UL)     // After this long, the pool must show valve=roof and main_pump=1
+
+// Shared between the loop and pool_link_task, under pool_mutex
+SemaphoreHandle_t pool_mutex;
+volatile bool pool_request_wanted = false;
+uint32_t pool_request_changes = 0;      // Bumped on every change, so the task sends at once
+Pool_Reply pool_reply;                  // The latest good reply
+unsigned long pool_reply_time = 0;      // millis() of it; 0 = none yet
+uint32_t pool_reply_count = 0;
+uint32_t pool_link_failures = 0;        // Failed tries in a row
+int pool_link_last_code = 0;
+
+bool pool_heat_request_on(void) { return pool_request_wanted; }
+
+static void set_pool_heat_request(bool on, const __FlashStringHelper *message)
 {
   if (message != nullptr) {
     out.print(message);
   }
-  pool_heat_request_relay_on_off_time = millis();
-  if (quad_lv_relay2 != nullptr) {
-    quad_lv_relay2->turnRelayOn(LV_RELAY2_POOL_HEAT_REQUEST);
+  pool_heat_request_on_off_time = millis();
+  xSemaphoreTake(pool_mutex, portMAX_DELAY);
+  if (pool_request_wanted != on) {
+    pool_request_wanted = on;
+    pool_request_changes++;
+  }
+  xSemaphoreGive(pool_mutex);
+}
+void turn_pool_heat_request_on(const __FlashStringHelper *message)  { set_pool_heat_request(true, message); }
+void turn_pool_heat_request_off(const __FlashStringHelper *message) { set_pool_heat_request(false, message); }
+
+static bool reply_field(const String &body, const char *key, String &value)
+{
+  String k = String(key) + "=";
+  int i = body.startsWith(k) ? 0 : body.indexOf(" " + k);
+  if (i < 0) {
+    return false;
+  }
+  if (i > 0) {
+    i++;
+  }
+  int start = i + k.length();
+  int end = body.indexOf(' ', start);
+  value = body.substring(start, end < 0 ? body.length() : end);
+  value.trim();
+  return true;
+}
+
+static bool parse_pool_reply(const String &body, Pool_Reply &r)
+{
+  String v;
+  if (!reply_field(body, "accepted", v)) return false;
+  r.accepted = v == "1";
+  if (!reply_field(body, "request", v)) return false;
+  r.request = v == "1";
+  if (!reply_field(body, "valve", v)) return false;
+  r.valve_roof = v == "roof";
+  if (!reply_field(body, "valve_power", v)) return false;
+  r.valve_power = v == "1";
+  if (!reply_field(body, "main_pump", v)) return false;
+  r.main_pump = v == "1";
+  if (!reply_field(body, "boost_pump", v)) return false;
+  r.boost_pump = v == "1";
+  if (!reply_field(body, "psi", v)) return false;
+  r.psi = v.toFloat();
+  if (!reply_field(body, "mode", v)) return false;
+  strlcpy(r.mode, v.c_str(), sizeof(r.mode));
+  return true;
+}
+
+// Its own FreeRTOS task, so a slow or absent pool controller never holds up the loop (or trips its watchdog).
+void pool_link_task(void *arg)
+{
+  uint32_t sent_changes = 0;
+  unsigned long last_send = 0;
+  bool sent_once = false;
+  for (;;) {
+    vTaskDelay(pdMS_TO_TICKS(200));
+    xSemaphoreTake(pool_mutex, portMAX_DELAY);
+    bool want = pool_request_wanted;
+    uint32_t changes = pool_request_changes;
+    xSemaphoreGive(pool_mutex);
+    if (!eth_connected) {
+      continue;
+    }
+    if (sent_once && changes == sent_changes && (millis() - last_send) < POOL_LINK_PERIOD_MS) {
+      continue;
+    }
+    sent_once = true;
+    sent_changes = changes;
+    last_send = millis();
+
+    NetworkClient client;
+    HTTPClient http;
+    http.setConnectTimeout(2000);
+    http.setTimeout(2000);
+    int code = -1;
+    String body;
+    if (http.begin(client, POOL_SOLAR_URL)) {
+      http.addHeader("X-Token", ST_PEER_TOKEN);
+      http.addHeader("Content-Type", "text/plain");
+      code = http.POST(want ? "on" : "off");
+      if (code == 200) {
+        body = http.getString();
+      }
+      http.end();
+    }
+    Pool_Reply r;
+    bool ok = code == 200 && parse_pool_reply(body, r);
+    xSemaphoreTake(pool_mutex, portMAX_DELAY);
+    pool_link_last_code = code;
+    if (ok) {
+      pool_reply = r;
+      pool_reply_time = millis();
+      pool_reply_count++;
+      pool_link_failures = 0;
+    } else {
+      pool_link_failures++;
+    }
+    xSemaphoreGive(pool_mutex);
   }
 }
 
-void turn_pool_heat_request_relay_off(const __FlashStringHelper *message)
+// Every second, in the loop: log what the pool controller says, alert if it stops answering, and give up on the
+// request if the pool hasn't started sending water to the roof POOL_ACK_TIME_MS after we asked.
+void monitor_pool_link_callback(void)
 {
-  if (message != nullptr) {
-    out.print(message);
+  static uint32_t seen_count = 0;
+  static Pool_Reply logged = {};
+  static bool logged_any = false;
+  static bool link_alerted = false;
+  static int last_day = -1;
+
+  xSemaphoreTake(pool_mutex, portMAX_DELAY);
+  Pool_Reply r = pool_reply;
+  unsigned long reply_time = pool_reply_time;
+  uint32_t count = pool_reply_count;
+  uint32_t failures = pool_link_failures;
+  int code = pool_link_last_code;
+  xSemaphoreGive(pool_mutex);
+
+  if (count != seen_count) {
+    seen_count = count;
+    if (!logged_any || r.accepted != logged.accepted || r.request != logged.request || r.valve_roof != logged.valve_roof ||
+        r.main_pump != logged.main_pump || r.boost_pump != logged.boost_pump || strcmp(r.mode, logged.mode) != 0) {
+      snprintf(cbuf, sizeof(cbuf), "# pool: accepted=%d request=%d mode=%s valve=%s pump=%d boost=%d psi=%.1f",
+               r.accepted, r.request, r.mode, r.valve_roof ? "roof" : "pool", r.main_pump, r.boost_pump, r.psi);
+      out.println(cbuf);
+      logged = r;
+      logged_any = true;
+    }
   }
-  pool_heat_request_relay_on_off_time = millis();
-  if (quad_lv_relay2 != nullptr) {
-    // daily_seconds_of_pool_heat_request_on_time += (millis() - pool_heat_request_relay_on_time) / 1000;
-    quad_lv_relay2->turnRelayOff(LV_RELAY2_POOL_HEAT_REQUEST);
+
+  if (failures >= 10 && !link_alerted) {
+    link_alerted = true;
+    out.print(F("# alert pool controller not answering pool-heat requests, last result "));
+    out.println(code);
+  } else if (failures == 0 && link_alerted) {
+    link_alerted = false;
+    out.println(F("# pool controller answering again"));
+  }
+
+  // Only in Oper: in the poolheat diag mode the request is set by hand, and stays as set.
+  if (operating_mode == m_oper && pool_heat_request_on() && (millis() - pool_heat_request_on_off_time) > POOL_ACK_TIME_MS) {
+    bool fresh = reply_time != 0 && (millis() - reply_time) < 2 * POOL_LINK_PERIOD_MS;
+    if (!fresh || !r.accepted || !r.request || !r.valve_roof || !r.main_pump) {
+      snprintf(cbuf, sizeof(cbuf), "# alert pool not heating: %s accepted=%d valve=%s pump=%d psi=%.1f\n",
+               fresh ? "reply" : "no recent reply,", r.accepted, r.valve_roof ? "roof" : "pool", r.main_pump, r.psi);
+      out.print(cbuf);
+      pool_heating_inop = true;
+      turn_pool_heat_request_off(F("# pool heat request off: pool controller not sending water to the roof\n"));
+    }
+  }
+
+  // Give pool heating another chance each day after a failure
+  if (time_valid) {
+    int d = day(now());
+    if (d != last_day) {
+      if (last_day != -1 && pool_heating_inop) {
+        pool_heating_inop = false;
+        out.println(F("# pool heating re-enabled for the new day"));
+      }
+      last_day = d;
+    }
   }
 }
 
@@ -1196,7 +1379,7 @@ void print_status_to_serial_callback(void)
       last_spa_open != spa_heat_ex_valve_open() ||
       last_roof_valves_to_pool != !roof_valves_status_in_tank_mode() ||
       last_switches != roof_valve_switches() ||
-      last_pool_heat != pool_heat_request_relay_on() ||
+      last_pool_heat != pool_heat_request_on() ||
       last_operating_mode != operating_mode ||
       records_skipped++ > 800) {
 
@@ -1209,7 +1392,7 @@ void print_status_to_serial_callback(void)
     last_spa_open = spa_heat_ex_valve_open();
     last_roof_valves_to_pool = !roof_valves_status_in_tank_mode();
     last_switches = roof_valve_switches();
-    last_pool_heat = pool_heat_request_relay_on();
+    last_pool_heat = pool_heat_request_on();
     last_operating_mode = operating_mode;
 
     // We generate the output line in chunks, to conversve memory.  But it also makes the code easier to
@@ -1250,7 +1433,7 @@ void print_status_to_serial_callback(void)
       uint8_t sw = roof_valve_switches();
       snprintf(cbuf, sizeof(cbuf), "%4d %4d %4d %d%d%d%d",
           !roof_valves_status_in_tank_mode(),
-          pool_heat_request_relay_on(),
+          pool_heat_request_on(),
           operating_mode,
           (sw >> 3) & 1, (sw >> 2) & 1, (sw >> 1) & 1, sw & 1);
     }
@@ -1328,7 +1511,7 @@ void monitor_roof_valves_callback()
   // (to give the panels time to drain) and then turn the pool-heat-request-relay on at 
   // least 20 seconds after we have started the roof valves in motion.
 
-  if (!solar_pump_on() && !pool_heat_request_relay_on() && pool_heating_season() &&
+  if (!solar_pump_on() && !pool_heat_request_on() && pool_heating_season() &&
       temps[tank_e].temperature_valid && temps[tank_e].temperature_F >= 140 &&
       average_panel_temperature_F > 120) {
     // If we have given the tank water time to drain back to the tank, then turn the roof
@@ -1359,7 +1542,7 @@ void monitor_roof_valves_callback()
             spew_counter++;
           }
         } else {
-          turn_pool_heat_request_relay_on(F("# pool-heat request\n"));
+          turn_pool_heat_request_on(F("# pool-heat request\n"));
         }
       } 
     }
@@ -1367,13 +1550,13 @@ void monitor_roof_valves_callback()
 
    // Turn off pool-heat request if the the panels are too cold to be effective
    // for even heating the pool
-  if (pool_heat_request_relay_on()) {
+  if (pool_heat_request_on()) {
     // Defensive programming: ensure that we don't toggle the pool heat request relay too often
-    if ((millis() - pool_heat_request_relay_on_off_time) > 20 * 60 * 1000UL) {
+    if ((millis() - pool_heat_request_on_off_time) > 20 * 60 * 1000UL) {
       if (average_panel_temperature_F < 90.0) {
-        turn_pool_heat_request_relay_off(F("# pool heat request off: low panel temperature\n"));
+        turn_pool_heat_request_off(F("# pool heat request off: low panel temperature\n"));
       } else if (!pool_heating_season()) {
-        turn_pool_heat_request_relay_off(F("# pool heat request off: not pool heating season"));
+        turn_pool_heat_request_off(F("# pool heat request off: not pool heating season"));
       }
     }
   } else {
@@ -1387,7 +1570,7 @@ void monitor_roof_valves_callback()
   // delays in recognizing signals, etc.
 
     if (roof_valves_set_to_pool_mode() &&
-        (millis() - pool_heat_request_relay_on_off_time) > (4 * 60 * 1000UL)) {
+        (millis() - pool_heat_request_on_off_time) > (4 * 60 * 1000UL)) {
           // Give time for the pool heat request relay (after we have turned the
           // roof valves to pool mode) to turn on.  Once that happens, we won't 
           // infer from the roof valve position that we have stopped wanting to solar-heat
@@ -1400,7 +1583,7 @@ void monitor_roof_valves_callback()
       }
     }
   }
-  // A commanded move must reach its position within 15 seconds.  "URGENT" in the line makes the server send it at
+  // A commanded move must reach its position within 10 seconds.  "URGENT" in the line makes the server send it at
   // high priority and by email as well.
   static uint8_t last_reported = 0xFF;
   uint8_t sw = roof_valve_switches();
@@ -1419,8 +1602,10 @@ void monitor_roof_valves_callback()
       last_reported = sw;
       out.print(F("# alert URGENT roof valves did not reach "));
       out.print(roof_valves_set_to_tank_mode() ? F("tank") : F("pool"));
-      out.print(F(" mode within 15 s, switches 0x"));
-      out.println(sw, HEX);
+      out.print(F(" mode within "));
+      out.print(max_roof_valves_move_time / 1000UL);
+      out.print(F(" s, switches "));
+      out.println(roof_switches_text(sw));
     }
   } else if ((millis() - roof_valves_motion_start_time) > 30 * 1000UL) {
     // Report once each time the switches stop matching the command, and again if the pattern changes.
@@ -1431,8 +1616,8 @@ void monitor_roof_valves_callback()
       if (sw == 0) {
         out.println(F("# roof valve switches: none closed (not wired yet, or no common)"));
       } else {
-        out.print(F("# alert roof valve switches 0x"));
-        out.print(sw, HEX);
+        out.print(F("# alert roof valve switches "));
+        out.print(roof_switches_text(sw));
         out.println(roof_valves_set_to_tank_mode() ? F(" do not show tank mode") : F(" do not show pool mode"));
       }
     }
@@ -1807,9 +1992,21 @@ void handle_status(void)
   s += "  \"solar_pump\": " + String(solar_pump_on()) + ", \"recirc_pump\": " + String(recirc_pump_on()) +
        ", \"takagi\": " + String(takagi_on()) + ", \"spa_electric\": " + String(spa_heater_relay_on()) + ",\n";
   s += "  \"spa_valve_open\": " + String(spa_heat_ex_valve_open()) + ", \"spa_call\": " + String(spa_calling_for_heat()) + ",\n";
-  s += "  \"roof_switches\": \"" + String(roof_valve_switches(), BIN) + "\", \"roof_status_pool\": " + String(roof_valves_status_in_pool_mode()) + ",\n";
+  s += "  \"roof_switches\": \"" + roof_switches_text(roof_valve_switches()) + "\", \"roof_status_pool\": " + String(roof_valves_status_in_pool_mode()) + ",\n";
   s += "  \"roof_status_tank\": " + String(roof_valves_status_in_tank_mode()) + ", \"roof_set_tank\": " + String(roof_valves_set_to_tank_mode()) +
-       ", \"roof_power\": " + String(roof_valves_power_is_on()) + ", \"pool_request\": " + String(pool_heat_request_relay_on()) + ",\n";
+       ", \"roof_power\": " + String(roof_valves_power_is_on()) + ", \"pool_request\": " + String(pool_heat_request_on()) + ",\n";
+  {
+    xSemaphoreTake(pool_mutex, portMAX_DELAY);
+    Pool_Reply r = pool_reply;
+    unsigned long reply_time = pool_reply_time;
+    uint32_t failures = pool_link_failures;
+    xSemaphoreGive(pool_mutex);
+    s += "  \"pool_reply_age_s\": " + String(reply_time == 0 ? -1L : (long)((millis() - reply_time) / 1000)) +
+         ", \"pool_link_failures\": " + String(failures) + ", \"pool_heating_inop\": " + String(pool_heating_inop) + ",\n";
+    s += "  \"pool_accepted\": " + String(r.accepted) + ", \"pool_mode\": \"" + String(r.mode) + "\", \"pool_valve\": \"" +
+         String(r.valve_roof ? "roof" : "pool") + "\", \"pool_main_pump\": " + String(r.main_pump) + ", \"pool_psi\": " +
+         String(r.psi, 1) + ",\n";
+  }
   s += "  \"relays\": " + String(quad_lv_relay1 != nullptr ? quad_lv_relay1->state() : 0) +
        ", \"analog_module\": " + String(analog_failures < 20 ? "true" : "false") + ",\n";
   {
@@ -2036,6 +2233,7 @@ void setup(void)
 {
   Serial.begin(SERIAL_BAUD);
   lines_mutex = xSemaphoreCreateMutex();
+  pool_mutex = xSemaphoreCreateMutex();
   recent_lines.init(64 * 1024, true);
   upload_queue.init(1024 * 1024, true);
 
@@ -2060,12 +2258,11 @@ void setup(void)
   out.println(reset_cause);
 
   check_relays_callback();     // This sets quad_lv_relay1 and quad_lv_relay2
-  if (pool_heat_request_relay_on() && roof_valves_set_to_tank_mode()) {
-    turn_pool_heat_request_relay_off(F("# alert: request relay on, but roof valves in tank mode\n"));
-  }
+  relay_write(RELAY_SPARE_5, false);    // The old pool-heat request relay, now unused
   setup_temperature_sensors();
   setup_network();
   xTaskCreatePinnedToCore(upload_task, "upload", 8192, nullptr, 1, nullptr, 0);
+  xTaskCreatePinnedToCore(pool_link_task, "pool_link", 6144, nullptr, 1, nullptr, 0);
   mark_firmware_good.enableDelayed(TASK_SECOND * 60);
 
   esp_task_wdt_config_t wdt_config = {.timeout_ms = 8000, .idle_core_mask = 0, .trigger_panic = true};

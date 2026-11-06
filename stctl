@@ -10,9 +10,11 @@
   stctl upload on|off      stream telemetry to bedichek.org (kept across restarts)
   stctl + | - | reboot
 
-The controller is http://solarthermal, 192.168.1.9 (set STCTL_HOST to override).  Its two tokens live in
+The controller is http://solarthermal, 192.168.1.9 (set STCTL_HOST to override).  Its own two tokens live in
 ~/.config/stctl/: lan_token (commands and updates from the LAN) and ingest_token (its uploads to
-bedichek.org).  They are made on first use and compiled into the firmware; never print them.
+bedichek.org).  A third, ~/.config/solar-pool-link/peer_token, is shared with the other controller: solarthermal
+sends its pool-heat requests to the pool controller with it.  They are made on first use and compiled into the
+firmware; never print them.
 """
 
 import glob
@@ -34,10 +36,16 @@ HOST = os.environ.get("STCTL_HOST", "192.168.1.9")
 CONF = os.path.expanduser("~/.config/stctl")
 
 
-def token(name):
-    path = os.path.join(CONF, name)
+# The token solarthermal uses for its pool-heat requests to the pool controller (POST /solar).  poolctl and stctl
+# both compile it in, from this one file.
+PEER_CONF = os.path.expanduser("~/.config/solar-pool-link")
+
+
+def token(name, conf=None):
+    conf = conf or CONF
+    path = os.path.join(conf, name)
     if not os.path.exists(path):
-        os.makedirs(CONF, mode=0o700, exist_ok=True)
+        os.makedirs(conf, mode=0o700, exist_ok=True)
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
         with os.fdopen(fd, "w") as f:
             f.write(secrets.token_hex(24) + "\n")
@@ -48,7 +56,8 @@ def token(name):
 def write_secrets():
     text = ("// Written by stctl from ~/.config/stctl; not in git\n"
             f'#define ST_LAN_TOKEN "{token("lan_token")}"\n'
-            f'#define ST_INGEST_TOKEN "{token("ingest_token")}"\n')
+            f'#define ST_INGEST_TOKEN "{token("ingest_token")}"\n'
+            f'#define ST_PEER_TOKEN "{token("peer_token", PEER_CONF)}"\n')
     path = os.path.join(SKETCH, "secrets.h")
     old = open(path).read() if os.path.exists(path) else None
     if old != text:
